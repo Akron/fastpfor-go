@@ -268,6 +268,50 @@ func TestPackDeltaFullBlockCompression(t *testing.T) {
 	assertCompressionBelowRaw(t, buf, BlockSize*4)
 }
 
+func FuzzPackRoundTrip(f *testing.F) {
+	corpus := [][]uint32{
+		nil,
+		{0},
+		{mathMaxUint32},
+		{1, 2, 3, 4, 5},
+		genSequential(BlockSize),
+		genMixed(32),
+	}
+	for _, seed := range corpus {
+		if len(seed) == 0 {
+			f.Add([]byte{})
+			continue
+		}
+		f.Add(encodeValuesSeed(seed))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		values := fuzzBytesToValues(data)
+		buf := assertRoundTrip(t, values)
+		assertValidEncoding(t, buf)
+	})
+}
+
+func FuzzPackDeltaRoundTrip(f *testing.F) {
+	corpus := [][]uint32{
+		nil,
+		genMonotonic(8),
+		genMixed(8),
+		genMixed(BlockSize),
+	}
+	for _, seed := range corpus {
+		if len(seed) == 0 {
+			f.Add([]byte{})
+			continue
+		}
+		f.Add(encodeValuesSeed(seed))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		values := fuzzBytesToValues(data)
+		buf := assertDeltaRoundTrip(t, values)
+		assertValidEncoding(t, buf)
+	})
+}
+
 func TestPackAppendsInPlace(t *testing.T) {
 	assert := assert.New(t)
 	prefix := make([]byte, 8, 128)
@@ -471,4 +515,73 @@ func assertDeltaRoundTrip(t *testing.T, src []uint32) []byte {
 func assertCompressionBelowRaw(t *testing.T, buf []byte, rawBytes int) {
 	t.Helper()
 	assert.Less(t, len(buf), rawBytes, "expected compressed output smaller than raw bytes")
+}
+
+func assertValidEncoding(t *testing.T, buf []byte) {
+	t.Helper()
+	if len(buf) < headerBytes {
+		t.Fatalf("encoded buffer too small: %d", len(buf))
+	}
+	header := binary.LittleEndian.Uint32(buf[:headerBytes])
+	count, bitWidth, hasExceptions := decodeHeader(header)
+	if count < 0 || count > BlockSize {
+		t.Fatalf("invalid element count %d", count)
+	}
+	payloadLen := payloadBytes(bitWidth)
+	minLen := headerBytes + payloadLen
+	if len(buf) < minLen {
+		t.Fatalf("payload truncated: need %d bytes, have %d", minLen, len(buf))
+	}
+	if !hasExceptions {
+		if len(buf) != minLen {
+			t.Fatalf("unexpected trailing bytes without exceptions: got %d want %d", len(buf), minLen)
+		}
+		return
+	}
+	if len(buf) < minLen+1 {
+		t.Fatalf("missing exception count byte")
+	}
+	excCount := int(buf[minLen])
+	if excCount > BlockSize {
+		t.Fatalf("exception count %d exceeds block size", excCount)
+	}
+	want := minLen + 1 + excCount + excCount*4
+	if len(buf) != want {
+		t.Fatalf("exception payload mismatch: got %d want %d (count=%d)", len(buf), want, excCount)
+	}
+}
+
+func fuzzBytesToValues(data []byte) []uint32 {
+	if len(data) == 0 {
+		return nil
+	}
+	count := (len(data) + 3) / 4
+	if count > BlockSize {
+		count = BlockSize
+	}
+	values := make([]uint32, count)
+	for i := 0; i < count; i++ {
+		start := i * 4
+		var v uint32
+		for b := 0; b < 4; b++ {
+			idx := start + b
+			if idx >= len(data) {
+				break
+			}
+			v |= uint32(data[idx]) << (8 * b)
+		}
+		values[i] = v
+	}
+	return values
+}
+
+func encodeValuesSeed(values []uint32) []byte {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]byte, len(values)*4)
+	for i, v := range values {
+		binary.LittleEndian.PutUint32(out[i*4:], v)
+	}
+	return out
 }
