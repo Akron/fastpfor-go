@@ -101,7 +101,7 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 // the supplied dst slice (which will be resized as needed).
 func Unpack(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
-		panic("fastpfor: buffer too small for header")
+		panic(fmt.Sprintf("fastpfor: Unpack buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
 	header := bo.Uint32(buf[:headerBytes])
 	count, bitWidth, hasExceptions, _ := decodeHeader(header)
@@ -127,19 +127,19 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 
 	if hasExceptions {
 		if len(buf) < minNeeded+1 {
-			panic("fastpfor: missing exception count")
+			panic(fmt.Sprintf("fastpfor: Unpack missing exception count byte at offset %d", minNeeded))
 		}
 		patch := buf[minNeeded:]
 		excCount := int(patch[0])
 		patch = patch[1:]
 		if len(patch) < excCount {
-			panic("fastpfor: truncated exception positions")
+			panic(fmt.Sprintf("fastpfor: Unpack truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
 		}
 		positions := patch[:excCount]
 		patch = patch[excCount:]
 		valueBytes := excCount * 4
 		if len(patch) < valueBytes {
-			panic("fastpfor: truncated exception values")
+			panic(fmt.Sprintf("fastpfor: Unpack truncated exception values (need %d bytes, got %d)", valueBytes, len(patch)))
 		}
 		applyExceptions(dst[:count], positions, patch[:valueBytes], bitWidth)
 	}
@@ -168,7 +168,7 @@ func PackDelta(dst []byte, values []uint32, scratch []uint32) []byte {
 // first and then performing a prefix sum to reconstruct the original values.
 func UnpackDelta(dst []uint32, buf []byte, scratch []uint32) []uint32 {
 	if len(buf) < headerBytes {
-		panic("fastpfor: buffer too small for header")
+		panic(fmt.Sprintf("fastpfor: UnpackDelta buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
 	header := bo.Uint32(buf[:headerBytes])
 	_, _, _, useZigZag := decodeHeader(header)
@@ -185,10 +185,10 @@ func UnpackDelta(dst []uint32, buf []byte, scratch []uint32) []uint32 {
 // integers. FastPFOR always operates on fixed 128-value chunks.
 func validateBlockLength(n int) {
 	if n < 0 {
-		panic("fastpfor: negative block length")
+		panic(fmt.Sprintf("fastpfor: invalid block length %d (cannot be negative)", n))
 	}
 	if n > BlockSize {
-		panic(fmt.Sprintf("fastpfor: block length %d > %d", n, BlockSize))
+		panic(fmt.Sprintf("fastpfor: block length %d exceeds maximum %d", n, BlockSize))
 	}
 }
 
@@ -282,7 +282,7 @@ func packLanes(dst []byte, values []uint32, bitWidth int) {
 
 // packLane packs 32 integers taken from the specified lane (lane, lane+4, …)
 // into the destination buffer using a streaming 64-bit accumulator.
-func packLane(buf []byte, values []uint32, lane, bitWidth int) {
+func packLane(output []byte, values []uint32, lane, bitWidth int) {
 	// Rough C++ equivalent (FastPFor.cpp::fastpackwithoutmask):
 	//
 	//	for(uint32_t i = 0; i < 32; ++i) {
@@ -294,15 +294,17 @@ func packLane(buf []byte, values []uint32, lane, bitWidth int) {
 	if bitWidth == 0 {
 		return
 	}
+
+	// Precompute mask outside the loop to avoid repeated conditional checks
 	var mask uint64
 	if bitWidth >= 32 {
 		mask = uint64(mathMaxUint32)
 	} else {
 		mask = uint64((1 << bitWidth) - 1)
 	}
+
 	var acc uint64
 	var bitsInAcc int
-	out := buf
 	outIdx := 0
 
 	for i := range laneLength {
@@ -314,14 +316,14 @@ func packLane(buf []byte, values []uint32, lane, bitWidth int) {
 		acc |= (uint64(v) & mask) << bitsInAcc
 		bitsInAcc += bitWidth
 		for bitsInAcc >= 32 {
-			bo.PutUint32(out[outIdx:], uint32(acc))
+			bo.PutUint32(output[outIdx:], uint32(acc))
 			outIdx += 4
 			acc >>= 32
 			bitsInAcc -= 32
 		}
 	}
 	if bitsInAcc > 0 {
-		bo.PutUint32(out[outIdx:], uint32(acc))
+		bo.PutUint32(output[outIdx:], uint32(acc))
 	}
 }
 
@@ -343,7 +345,7 @@ func unpackLanes(dst []uint32, payload []byte, count, bitWidth int) {
 // unpackLane reconstructs the original integers for a single lane and writes
 // them back into dst at the interleaved lane offsets. Mirrors packLane but in
 // reverse order (a literal translation of FastPFor.cpp::fastunpack)
-func unpackLane(dst []uint32, buf []byte, lane, bitWidth, count int) {
+func unpackLane(dst []uint32, input []byte, lane, bitWidth, count int) {
 	//	for(uint32_t i = 0; i < 32; ++i) {
 	//	  while(bitOffset < bitWidth) { buffer |= (uint64_t)(*in++) << bitOffset; bitOffset += 32; }
 	//	  output[i] = uint32_t(buffer) & mask;
@@ -353,23 +355,26 @@ func unpackLane(dst []uint32, buf []byte, lane, bitWidth, count int) {
 	if bitWidth == 0 {
 		return
 	}
+
+	// Precompute mask outside the loop to avoid repeated conditional checks
 	var mask uint32
 	if bitWidth >= 32 {
 		mask = mathMaxUint32
 	} else {
 		mask = (1 << bitWidth) - 1
 	}
+
 	var acc uint64
 	var bitsInAcc int
 	inIdx := 0
 	for i := range laneLength {
 		for bitsInAcc < bitWidth {
-			if inIdx >= len(buf) {
+			if inIdx >= len(input) {
 				acc |= uint64(0) << bitsInAcc
 				bitsInAcc = bitWidth // force exit
 				break
 			}
-			acc |= uint64(bo.Uint32(buf[inIdx:])) << bitsInAcc
+			acc |= uint64(bo.Uint32(input[inIdx:])) << bitsInAcc
 			inIdx += 4
 			bitsInAcc += 32
 		}
@@ -397,6 +402,7 @@ func selectBitWidth(values []uint32) (width int, exceptions []exception) {
 	//	  pick smallest bitsRequired, break ties with smaller b.
 	//	}
 	//
+
 	maxWidth := requiredBitWidth(values)
 	bestWidth := maxWidth
 	bestSize := headerBytes + payloadBytes(maxWidth)
@@ -462,7 +468,7 @@ func writeExceptions(dst []byte, exceptions []exception) {
 func applyExceptions(dst []uint32, positions []byte, values []byte, bitWidth int) {
 	for i, idx := range positions {
 		if int(idx) >= len(dst) {
-			panic("fastpfor: exception index out of range")
+			panic(fmt.Sprintf("fastpfor: exception index %d out of range (max %d)", int(idx), len(dst)-1))
 		}
 		high := bo.Uint32(values[i*4:])
 		dst[int(idx)] |= high << bitWidth
@@ -487,7 +493,7 @@ func deltaEncode(dst, src []uint32) bool {
 	prev = 0
 	if needZigZag {
 		if !fitsInt32 {
-			panic("fastpfor: delta difference exceeds zigzag range")
+			panic("fastpfor: delta difference exceeds 32-bit signed integer range, cannot apply zigzag encoding")
 		}
 		for i, v := range src {
 			diff := int32(int64(v) - int64(prev))
