@@ -33,9 +33,7 @@ const (
 	//   (b) the per-lane bit width used for packing,
 	//   (c) flag bits that describe optional sections (exceptions, delta markers, etc).
 	headerBytes = 4
-)
 
-const (
 	headerCountBits = 8
 	headerWidthBits = 6
 
@@ -44,7 +42,22 @@ const (
 	headerWidthShift = headerCountBits
 
 	headerExceptionFlag = uint32(1 << 31)
+	headerZigZagFlag    = uint32(1 << 30)
+
+	// mathMaxUint32 helps avoid repeated casts when constructing bit masks.
+	mathMaxUint32 = ^uint32(0)
+	maxInt32      = int64(1<<31 - 1)
+	minInt32      = -1 << 31
 )
+
+// exception tracks a single patched integer: its index in the block and the
+// high bits that must be re-applied after unpacking the truncated value.
+type exception struct {
+	index uint8
+	high  uint32
+}
+
+var bo = binary.LittleEndian
 
 // Pack encodes up to BlockSize uint32 values into the FastPFOR block format.
 // The function appends the block to dst so the caller can reuse buffers and
@@ -55,6 +68,10 @@ const (
 //   - Interleaved lane payload packed at the chosen width
 //   - Optional exception table (count byte, positions, high bits)
 func Pack(dst []byte, values []uint32) []byte {
+	return packInternal(dst, values, 0)
+}
+
+func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	validateBlockLength(len(values))
 	bitWidth, exceptions := selectBitWidth(values)
 	payloadLen := payloadBytes(bitWidth)
@@ -62,12 +79,12 @@ func Pack(dst []byte, values []uint32) []byte {
 
 	var start int
 	dst, start = appendSpace(dst, total)
-	flags := uint32(0)
+	flags := extraFlags
 	if len(exceptions) > 0 {
-		flags = headerExceptionFlag
+		flags |= headerExceptionFlag
 	}
 	header := encodeHeader(len(values), bitWidth, flags)
-	binary.LittleEndian.PutUint32(dst[start:start+headerBytes], header)
+	bo.PutUint32(dst[start:start+headerBytes], header)
 
 	payloadStart := start + headerBytes
 	payloadEnd := payloadStart + payloadLen
@@ -86,8 +103,8 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
 		panic("fastpfor: buffer too small for header")
 	}
-	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	count, bitWidth, hasExceptions := decodeHeader(header)
+	header := bo.Uint32(buf[:headerBytes])
+	count, bitWidth, hasExceptions, _ := decodeHeader(header)
 	validateBlockLength(count)
 
 	payloadLen := payloadBytes(bitWidth)
@@ -136,21 +153,31 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 func PackDelta(dst []byte, values []uint32, scratch []uint32) []byte {
 	validateBlockLength(len(values))
 	scratch = ensureUint32Len(scratch, len(values))
+	var useZigZag bool
 	if len(values) > 0 {
-		deltaEncode(scratch[:len(values)], values)
+		useZigZag = deltaEncode(scratch[:len(values)], values)
 	}
-	return Pack(dst, scratch[:len(values)])
+	var flags uint32
+	if useZigZag {
+		flags |= headerZigZagFlag
+	}
+	return packInternal(dst, scratch[:len(values)], flags)
 }
 
 // UnpackDelta reverses PackDelta by unpacking into the provided scratch space
 // first and then performing a prefix sum to reconstruct the original values.
 func UnpackDelta(dst []uint32, buf []byte, scratch []uint32) []uint32 {
+	if len(buf) < headerBytes {
+		panic("fastpfor: buffer too small for header")
+	}
+	header := bo.Uint32(buf[:headerBytes])
+	_, _, _, useZigZag := decodeHeader(header)
 	deltas := Unpack(scratch[:0], buf)
 	if len(deltas) == 0 {
 		return dst[:0]
 	}
 	dst = ensureUint32Len(dst, len(deltas))
-	deltaDecode(dst[:len(deltas)], deltas)
+	deltaDecode(dst[:len(deltas)], deltas, useZigZag)
 	return dst[:len(deltas)]
 }
 
@@ -229,10 +256,11 @@ func encodeHeader(count, bitWidth int, flags uint32) uint32 {
 		flags
 }
 
-func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool) {
+func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, hasZigZag bool) {
 	count = int(header & headerCountMask)
 	bitWidth = int((header >> headerWidthShift) & headerWidthMask)
 	hasExceptions = header&headerExceptionFlag != 0
+	hasZigZag = header&headerZigZagFlag != 0
 	return
 }
 
@@ -286,14 +314,14 @@ func packLane(buf []byte, values []uint32, lane, bitWidth int) {
 		acc |= (uint64(v) & mask) << bitsInAcc
 		bitsInAcc += bitWidth
 		for bitsInAcc >= 32 {
-			binary.LittleEndian.PutUint32(out[outIdx:], uint32(acc))
+			bo.PutUint32(out[outIdx:], uint32(acc))
 			outIdx += 4
 			acc >>= 32
 			bitsInAcc -= 32
 		}
 	}
 	if bitsInAcc > 0 {
-		binary.LittleEndian.PutUint32(out[outIdx:], uint32(acc))
+		bo.PutUint32(out[outIdx:], uint32(acc))
 	}
 }
 
@@ -341,7 +369,7 @@ func unpackLane(dst []uint32, buf []byte, lane, bitWidth, count int) {
 				bitsInAcc = bitWidth // force exit
 				break
 			}
-			acc |= uint64(binary.LittleEndian.Uint32(buf[inIdx:])) << bitsInAcc
+			acc |= uint64(bo.Uint32(buf[inIdx:])) << bitsInAcc
 			inIdx += 4
 			bitsInAcc += 32
 		}
@@ -353,16 +381,6 @@ func unpackLane(dst []uint32, buf []byte, lane, bitWidth, count int) {
 			dst[idx] = value
 		}
 	}
-}
-
-// mathMaxUint32 helps avoid repeated casts when constructing bit masks.
-const mathMaxUint32 = ^uint32(0)
-
-// exception tracks a single patched integer: its index in the block and the
-// high bits that must be re-applied after unpacking the truncated value.
-type exception struct {
-	index uint8
-	high  uint32
 }
 
 // selectBitWidth picks the bit width that minimizes the serialized size. It
@@ -433,7 +451,7 @@ func writeExceptions(dst []byte, exceptions []exception) {
 		pos++
 	}
 	for _, ex := range exceptions {
-		binary.LittleEndian.PutUint32(dst[pos:], ex.high)
+		bo.PutUint32(dst[pos:], ex.high)
 		pos += 4
 	}
 }
@@ -446,25 +464,68 @@ func applyExceptions(dst []uint32, positions []byte, values []byte, bitWidth int
 		if int(idx) >= len(dst) {
 			panic("fastpfor: exception index out of range")
 		}
-		high := binary.LittleEndian.Uint32(values[i*4:])
+		high := bo.Uint32(values[i*4:])
 		dst[int(idx)] |= high << bitWidth
 	}
 }
 
 // deltaEncode writes first-order deltas from src into dst (len(dst) == len(src)).
-func deltaEncode(dst, src []uint32) {
+func deltaEncode(dst, src []uint32) bool {
 	var prev uint32
+	needZigZag := false
+	fitsInt32 := true
+	for _, v := range src {
+		diff := int64(v) - int64(prev)
+		if diff < minInt32 || diff > maxInt32 {
+			fitsInt32 = false
+		}
+		if diff < 0 {
+			needZigZag = true
+		}
+		prev = v
+	}
+	prev = 0
+	if needZigZag {
+		if !fitsInt32 {
+			panic("fastpfor: delta difference exceeds zigzag range")
+		}
+		for i, v := range src {
+			diff := int32(int64(v) - int64(prev))
+			dst[i] = zigzagEncode32(diff)
+			prev = v
+		}
+		return true
+	}
 	for i, v := range src {
 		dst[i] = v - prev
 		prev = v
 	}
+	return false
 }
 
 // deltaDecode reconstructs the prefix sums encoded by deltaEncode.
-func deltaDecode(dst, deltas []uint32) {
+func deltaDecode(dst, deltas []uint32, useZigZag bool) {
+	if useZigZag {
+		var prev int64
+		for i, d := range deltas {
+			prev += int64(zigzagDecode32(d))
+			dst[i] = uint32(prev)
+		}
+		return
+	}
 	var prev uint32
 	for i, d := range deltas {
 		prev += d
 		dst[i] = prev
 	}
+}
+
+// zigzagEncode32 encodes a 32-bit integer as a zigzag integer.
+func zigzagEncode32(v int32) uint32 {
+	return uint32(uint32(v<<1) ^ uint32(v>>31))
+}
+
+// zigzagDecode32 decodes a zigzag integer back into a 32-bit integer.
+func zigzagDecode32(v uint32) int32 {
+	return int32((v >> 1) ^ uint32(-(int32(v & 1))))
 }

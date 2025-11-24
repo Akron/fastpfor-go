@@ -90,6 +90,62 @@ func TestPackUnpackDeltaMixed(t *testing.T) {
 	assertDeltaRoundTrip(t, genMixed(BlockSize))
 }
 
+func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
+	assert := assert.New(t)
+	src := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
+	packScratch := make([]uint32, BlockSize)
+	buf := PackDelta(nil, src, packScratch)
+	header := binary.LittleEndian.Uint32(buf[:headerBytes])
+	_, _, _, hasZigZag := decodeHeader(header)
+	assert.True(hasZigZag, "expected zigzag flag for negative deltas")
+
+	unpackScratch := make([]uint32, BlockSize)
+	got := UnpackDelta(nil, buf, unpackScratch)
+	assert.Equal(src, got, "zigzag delta round-trip mismatch")
+}
+
+func TestPackDeltaMonotonicDoesNotSetZigZag(t *testing.T) {
+	assert := assert.New(t)
+	src := genMonotonic(32)
+	packScratch := make([]uint32, BlockSize)
+	buf := PackDelta(nil, src, packScratch)
+	header := binary.LittleEndian.Uint32(buf[:headerBytes])
+	_, _, _, hasZigZag := decodeHeader(header)
+	assert.False(hasZigZag, "monotonic data should not require zigzag encoding")
+}
+
+func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
+	assert := assert.New(t)
+	src := make([]uint32, 64)
+	value := uint32(1 << 20)
+	for i := 0; i < len(src); i++ {
+		switch i {
+		case 0:
+			src[i] = value
+		case 20:
+			value -= 5000
+			src[i] = value
+		case 40:
+			value += 1 << 24
+			src[i] = value
+		default:
+			value++
+			src[i] = value
+		}
+	}
+
+	packScratch := make([]uint32, BlockSize)
+	buf := PackDelta(nil, src, packScratch)
+	header := binary.LittleEndian.Uint32(buf[:headerBytes])
+	_, _, hasExceptions, hasZigZag := decodeHeader(header)
+	assert.True(hasZigZag, "expected zigzag flag when negative delta present")
+	assert.True(hasExceptions, "expected exceptions due to large zigzagged delta")
+
+	unpackScratch := make([]uint32, BlockSize)
+	got := UnpackDelta(nil, buf, unpackScratch)
+	assert.Equal(src, got, "zigzag delta with exceptions round-trip mismatch")
+}
+
 func TestPackBitWidthCoverage(t *testing.T) {
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
 	dst := make([]uint32, BlockSize)
@@ -106,7 +162,7 @@ func TestPackBitWidthCoverage(t *testing.T) {
 			}
 
 			header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-			_, bitWidth, hasExceptions := decodeHeader(header)
+			_, bitWidth, hasExceptions, _ := decodeHeader(header)
 
 			assert.False(hasExceptions, "unexpected exceptions for width %d", width)
 			assert.Equal(width, bitWidth, "header stored wrong bit width")
@@ -135,7 +191,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 2")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(2, bitWidth, "width 2 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 2")
 		assert.Equal(0, exceptionCount(encoded, bitWidth), "width 2 exception count mismatch")
@@ -154,7 +210,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 5")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(5, bitWidth, "width 5 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 5")
 		assert.Equal(0, exceptionCount(encoded, bitWidth), "width 5 exception count mismatch")
@@ -172,7 +228,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 13")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(13, bitWidth, "width 13 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 13")
 		assert.Equal(0, exceptionCount(encoded, bitWidth), "width 13 exception count mismatch")
@@ -190,7 +246,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 24")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(24, bitWidth, "width 24 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 24")
 		assert.Equal(0, exceptionCount(encoded, bitWidth), "width 24 exception count mismatch")
@@ -212,7 +268,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 32")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(32, bitWidth, "width 32 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 32")
 		assert.Equal(0, exceptionCount(encoded, bitWidth), "width 32 exception count mismatch")
@@ -232,7 +288,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 5 exceptions")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(5, bitWidth, "width 5 exception header mismatch")
 		assert.True(hasExceptions, "expected exceptions for width 5 case")
 		assert.Equal(2, exceptionCount(encoded, bitWidth), "width 5 exception count mismatch")
@@ -253,7 +309,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := Pack(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected Pack to reuse dst backing array for width 13 exceptions")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, hasExceptions := decodeHeader(header)
+		_, bitWidth, hasExceptions, _ := decodeHeader(header)
 		assert.Equal(13, bitWidth, "width 13 exception header mismatch")
 		assert.True(hasExceptions, "expected exceptions for width 13 case")
 		assert.Equal(3, exceptionCount(encoded, bitWidth), "width 13 exception count mismatch")
@@ -322,7 +378,7 @@ func TestPackAppendsInPlace(t *testing.T) {
 	assert.Equal(&prefix[0], &buf[0], "expected Pack to reuse dst capacity")
 	assert.Equal(prefix, buf[:len(prefix)], "prefix corrupted")
 	header := binary.LittleEndian.Uint32(buf[len(prefix) : len(prefix)+headerBytes])
-	_, width, hasExc := decodeHeader(header)
+	_, width, hasExc, _ := decodeHeader(header)
 	payloadLen := payloadBytes(width)
 	patchCount := 0
 	if hasExc {
@@ -523,7 +579,7 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 		t.Fatalf("encoded buffer too small: %d", len(buf))
 	}
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	count, bitWidth, hasExceptions := decodeHeader(header)
+	count, bitWidth, hasExceptions, _ := decodeHeader(header)
 	if count < 0 || count > BlockSize {
 		t.Fatalf("invalid element count %d", count)
 	}
