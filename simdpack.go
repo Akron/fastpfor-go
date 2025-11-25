@@ -2,12 +2,25 @@
 
 package fastpfor
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"golang.org/x/sys/cpu"
+)
 
 const (
 	blockSize       = 128
 	maxPayloadBytes = 32 * 16
 )
+
+func initSIMDSelection() {
+	if cpu.X86.HasSSE2 {
+		packLanesImpl = packLanesSIMDPreferred
+		unpackLanesImpl = unpackLanesSIMDPreferred
+		simdAvailable = true
+		return
+	}
+}
 
 type packASMFunc func(uintptr, *byte, int, *byte)
 
@@ -281,11 +294,6 @@ var unpackFuncs = [...]unpackASMFunc{
 
 var zeroSeed byte
 
-// Available reports whether the SIMD implementation is compiled in.
-func Available() bool {
-	return true
-}
-
 // simdPack encodes up to 128 uint32 values (zero-filled) into dst using SIMD bit packing.
 // dst must have space for bitWidth*16 bytes (same as scalar payload).
 func simdPack(dst []byte, values []uint32, bitWidth int) bool {
@@ -372,4 +380,3 @@ func align16(ptr uintptr) uintptr {
 	const mask = 16 - 1
 	return (ptr + mask) &^ mask
 }
-

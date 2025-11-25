@@ -50,6 +50,21 @@ const (
 	minInt32      = -1 << 31
 )
 
+var (
+	packLanesImpl   = packLanesScalar
+	unpackLanesImpl = unpackLanesScalar
+	simdAvailable   bool
+)
+
+func init() {
+	initSIMDSelection()
+}
+
+// Available reports whether SIMD-accelerated pack/unpack paths are active.
+func Available() bool {
+	return simdAvailable
+}
+
 // exception tracks a single patched integer: its index in the block and the
 // high bits that must be re-applied after unpacking the truncated value.
 type exception struct {
@@ -267,10 +282,13 @@ func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, h
 // packLanes splits the block into four SIMD-friendly lanes and bit-packs each
 // lane independently. Missing tail values (len < 128) are treated as zeros.
 func packLanes(dst []byte, values []uint32, bitWidth int) {
-	if simdPack(dst, values, bitWidth) {
-		return
+	packLanesImpl(dst, values, bitWidth)
+}
+
+func packLanesSIMDPreferred(dst []byte, values []uint32, bitWidth int) {
+	if !simdPack(dst, values, bitWidth) {
+		packLanesScalar(dst, values, bitWidth)
 	}
-	packLanesScalar(dst, values, bitWidth)
 }
 
 func packLanesScalar(dst []byte, values []uint32, bitWidth int) {
@@ -337,10 +355,13 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 // unpackLanes performs the inverse of packLanes, up to the logical element
 // count (tail values outside count retain their previous contents).
 func unpackLanes(dst []uint32, payload []byte, count, bitWidth int) {
-	if simdUnpack(dst, payload, bitWidth, count) {
-		return
+	unpackLanesImpl(dst, payload, count, bitWidth)
+}
+
+func unpackLanesSIMDPreferred(dst []uint32, payload []byte, count, bitWidth int) {
+	if !simdUnpack(dst, payload, bitWidth, count) {
+		unpackLanesScalar(dst, payload, count, bitWidth)
 	}
-	unpackLanesScalar(dst, payload, count, bitWidth)
 }
 
 func unpackLanesScalar(dst []uint32, payload []byte, count, bitWidth int) {

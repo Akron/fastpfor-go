@@ -2,6 +2,8 @@
 
 package fastpfor
 
+func initSIMDSelection() {}
+
 func simdPack(_ []byte, _ []uint32, _ int) bool {
 	return false
 }
@@ -9,4 +11,3 @@ func simdPack(_ []byte, _ []uint32, _ int) bool {
 func simdUnpack(_ []uint32, _ []byte, _, _ int) bool {
 	return false
 }
-
