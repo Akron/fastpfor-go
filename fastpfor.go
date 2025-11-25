@@ -267,6 +267,13 @@ func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, h
 // packLanes splits the block into four SIMD-friendly lanes and bit-packs each
 // lane independently. Missing tail values (len < 128) are treated as zeros.
 func packLanes(dst []byte, values []uint32, bitWidth int) {
+	if simdPack(dst, values, bitWidth) {
+		return
+	}
+	packLanesScalar(dst, values, bitWidth)
+}
+
+func packLanesScalar(dst []byte, values []uint32, bitWidth int) {
 	// Reference (FastPFor.cpp):
 	//
 	//	for(uint32_t k = 0; k < 4; ++k)
@@ -276,13 +283,13 @@ func packLanes(dst []byte, values []uint32, bitWidth int) {
 	}
 	bytesPerLane := len(dst) / laneCount
 	for lane := range laneCount {
-		packLane(dst[lane*bytesPerLane:(lane+1)*bytesPerLane], values, lane, bitWidth)
+		packLaneScalar(dst[lane*bytesPerLane:(lane+1)*bytesPerLane], values, lane, bitWidth)
 	}
 }
 
-// packLane packs 32 integers taken from the specified lane (lane, lane+4, …)
+// packLaneScalar packs 32 integers taken from the specified lane (lane, lane+4, …)
 // into the destination buffer using a streaming 64-bit accumulator.
-func packLane(output []byte, values []uint32, lane, bitWidth int) {
+func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 	// Rough C++ equivalent (FastPFor.cpp::fastpackwithoutmask):
 	//
 	//	for(uint32_t i = 0; i < 32; ++i) {
@@ -330,6 +337,13 @@ func packLane(output []byte, values []uint32, lane, bitWidth int) {
 // unpackLanes performs the inverse of packLanes, up to the logical element
 // count (tail values outside count retain their previous contents).
 func unpackLanes(dst []uint32, payload []byte, count, bitWidth int) {
+	if simdUnpack(dst, payload, bitWidth, count) {
+		return
+	}
+	unpackLanesScalar(dst, payload, count, bitWidth)
+}
+
+func unpackLanesScalar(dst []uint32, payload []byte, count, bitWidth int) {
 	if bitWidth == 0 {
 		for i := range count {
 			dst[i] = 0
@@ -338,14 +352,14 @@ func unpackLanes(dst []uint32, payload []byte, count, bitWidth int) {
 	}
 	bytesPerLane := len(payload) / laneCount
 	for lane := range laneCount {
-		unpackLane(dst, payload[lane*bytesPerLane:(lane+1)*bytesPerLane], lane, bitWidth, count)
+		unpackLaneScalar(dst, payload[lane*bytesPerLane:(lane+1)*bytesPerLane], lane, bitWidth, count)
 	}
 }
 
-// unpackLane reconstructs the original integers for a single lane and writes
+// unpackLaneScalar reconstructs the original integers for a single lane and writes
 // them back into dst at the interleaved lane offsets. Mirrors packLane but in
 // reverse order (a literal translation of FastPFor.cpp::fastunpack)
-func unpackLane(dst []uint32, input []byte, lane, bitWidth, count int) {
+func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
 	//	for(uint32_t i = 0; i < 32; ++i) {
 	//	  while(bitOffset < bitWidth) { buffer |= (uint64_t)(*in++) << bitOffset; bitOffset += 32; }
 	//	  output[i] = uint32_t(buffer) & mask;
