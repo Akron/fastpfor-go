@@ -22,10 +22,6 @@ func initSIMDSelection() {
 	}
 }
 
-type packASMFunc func(uintptr, *byte, int, *byte)
-
-type unpackASMFunc func(*byte, uintptr, int, *byte)
-
 // Assembly entry points provided by pack_amd64.s/unpack_amd64.s.
 //
 //go:noescape
@@ -220,78 +216,6 @@ func unpack32_31(in *byte, out uintptr, offset int, seed *byte)
 //go:noescape
 func unpack32_32(in *byte, out uintptr, offset int, seed *byte)
 
-var packFuncs = [...]packASMFunc{
-	nil,
-	pack32_1,
-	pack32_2,
-	pack32_3,
-	pack32_4,
-	pack32_5,
-	pack32_6,
-	pack32_7,
-	pack32_8,
-	pack32_9,
-	pack32_10,
-	pack32_11,
-	pack32_12,
-	pack32_13,
-	pack32_14,
-	pack32_15,
-	pack32_16,
-	pack32_17,
-	pack32_18,
-	pack32_19,
-	pack32_20,
-	pack32_21,
-	pack32_22,
-	pack32_23,
-	pack32_24,
-	pack32_25,
-	pack32_26,
-	pack32_27,
-	pack32_28,
-	pack32_29,
-	pack32_30,
-	pack32_31,
-	pack32_32,
-}
-
-var unpackFuncs = [...]unpackASMFunc{
-	nil,
-	unpack32_1,
-	unpack32_2,
-	unpack32_3,
-	unpack32_4,
-	unpack32_5,
-	unpack32_6,
-	unpack32_7,
-	unpack32_8,
-	unpack32_9,
-	unpack32_10,
-	unpack32_11,
-	unpack32_12,
-	unpack32_13,
-	unpack32_14,
-	unpack32_15,
-	unpack32_16,
-	unpack32_17,
-	unpack32_18,
-	unpack32_19,
-	unpack32_20,
-	unpack32_21,
-	unpack32_22,
-	unpack32_23,
-	unpack32_24,
-	unpack32_25,
-	unpack32_26,
-	unpack32_27,
-	unpack32_28,
-	unpack32_29,
-	unpack32_30,
-	unpack32_31,
-	unpack32_32,
-}
-
 var zeroSeed byte
 
 // simdPack encodes up to 128 uint32 values (zero-filled) into dst using SIMD bit packing.
@@ -304,10 +228,7 @@ func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 	if len(dst) < needed {
 		return false
 	}
-	fn := packFuncs[bitWidth]
-	if fn == nil {
-		return false
-	}
+
 	var valueStorage [blockSize + 4]uint32
 	valuesBuf := alignedUint32Slice(&valueStorage)
 	var mask uint32 = 0xFFFFFFFF
@@ -319,12 +240,79 @@ func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 	}
 	var payloadStorage [maxPayloadBytes + 16]byte
 	payloadBuf := alignedByteSlice(&payloadStorage)
-	fn(
-		uintptr(unsafe.Pointer(&valuesBuf[0])),
-		&payloadBuf[0],
-		0,
-		&zeroSeed,
-	)
+
+	inPtr := uintptr(unsafe.Pointer(&valuesBuf[0]))
+	outPtr := &payloadBuf[0]
+
+	switch bitWidth {
+	case 1:
+		pack32_1(inPtr, outPtr, 0, &zeroSeed)
+	case 2:
+		pack32_2(inPtr, outPtr, 0, &zeroSeed)
+	case 3:
+		pack32_3(inPtr, outPtr, 0, &zeroSeed)
+	case 4:
+		pack32_4(inPtr, outPtr, 0, &zeroSeed)
+	case 5:
+		pack32_5(inPtr, outPtr, 0, &zeroSeed)
+	case 6:
+		pack32_6(inPtr, outPtr, 0, &zeroSeed)
+	case 7:
+		pack32_7(inPtr, outPtr, 0, &zeroSeed)
+	case 8:
+		pack32_8(inPtr, outPtr, 0, &zeroSeed)
+	case 9:
+		pack32_9(inPtr, outPtr, 0, &zeroSeed)
+	case 10:
+		pack32_10(inPtr, outPtr, 0, &zeroSeed)
+	case 11:
+		pack32_11(inPtr, outPtr, 0, &zeroSeed)
+	case 12:
+		pack32_12(inPtr, outPtr, 0, &zeroSeed)
+	case 13:
+		pack32_13(inPtr, outPtr, 0, &zeroSeed)
+	case 14:
+		pack32_14(inPtr, outPtr, 0, &zeroSeed)
+	case 15:
+		pack32_15(inPtr, outPtr, 0, &zeroSeed)
+	case 16:
+		pack32_16(inPtr, outPtr, 0, &zeroSeed)
+	case 17:
+		pack32_17(inPtr, outPtr, 0, &zeroSeed)
+	case 18:
+		pack32_18(inPtr, outPtr, 0, &zeroSeed)
+	case 19:
+		pack32_19(inPtr, outPtr, 0, &zeroSeed)
+	case 20:
+		pack32_20(inPtr, outPtr, 0, &zeroSeed)
+	case 21:
+		pack32_21(inPtr, outPtr, 0, &zeroSeed)
+	case 22:
+		pack32_22(inPtr, outPtr, 0, &zeroSeed)
+	case 23:
+		pack32_23(inPtr, outPtr, 0, &zeroSeed)
+	case 24:
+		pack32_24(inPtr, outPtr, 0, &zeroSeed)
+	case 25:
+		pack32_25(inPtr, outPtr, 0, &zeroSeed)
+	case 26:
+		pack32_26(inPtr, outPtr, 0, &zeroSeed)
+	case 27:
+		pack32_27(inPtr, outPtr, 0, &zeroSeed)
+	case 28:
+		pack32_28(inPtr, outPtr, 0, &zeroSeed)
+	case 29:
+		pack32_29(inPtr, outPtr, 0, &zeroSeed)
+	case 30:
+		pack32_30(inPtr, outPtr, 0, &zeroSeed)
+	case 31:
+		pack32_31(inPtr, outPtr, 0, &zeroSeed)
+	case 32:
+		pack32_32(inPtr, outPtr, 0, &zeroSeed)
+	default:
+		return false
+	}
+
 	copy(dst[:needed], payloadBuf[:needed])
 	return true
 }
@@ -341,21 +329,85 @@ func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 	if len(dst) < count {
 		return false
 	}
-	fn := unpackFuncs[bitWidth]
-	if fn == nil {
-		return false
-	}
+
 	var payloadStorage [maxPayloadBytes + 16]byte
 	payloadBuf := alignedByteSlice(&payloadStorage)
 	copy(payloadBuf[:needed], payload[:needed])
 	var valueStorage [blockSize + 4]uint32
 	valuesBuf := alignedUint32Slice(&valueStorage)
-	fn(
-		&payloadBuf[0],
-		uintptr(unsafe.Pointer(&valuesBuf[0])),
-		0,
-		&zeroSeed,
-	)
+
+	inPtr := &payloadBuf[0]
+	outPtr := uintptr(unsafe.Pointer(&valuesBuf[0]))
+
+	switch bitWidth {
+	case 1:
+		unpack32_1(inPtr, outPtr, 0, &zeroSeed)
+	case 2:
+		unpack32_2(inPtr, outPtr, 0, &zeroSeed)
+	case 3:
+		unpack32_3(inPtr, outPtr, 0, &zeroSeed)
+	case 4:
+		unpack32_4(inPtr, outPtr, 0, &zeroSeed)
+	case 5:
+		unpack32_5(inPtr, outPtr, 0, &zeroSeed)
+	case 6:
+		unpack32_6(inPtr, outPtr, 0, &zeroSeed)
+	case 7:
+		unpack32_7(inPtr, outPtr, 0, &zeroSeed)
+	case 8:
+		unpack32_8(inPtr, outPtr, 0, &zeroSeed)
+	case 9:
+		unpack32_9(inPtr, outPtr, 0, &zeroSeed)
+	case 10:
+		unpack32_10(inPtr, outPtr, 0, &zeroSeed)
+	case 11:
+		unpack32_11(inPtr, outPtr, 0, &zeroSeed)
+	case 12:
+		unpack32_12(inPtr, outPtr, 0, &zeroSeed)
+	case 13:
+		unpack32_13(inPtr, outPtr, 0, &zeroSeed)
+	case 14:
+		unpack32_14(inPtr, outPtr, 0, &zeroSeed)
+	case 15:
+		unpack32_15(inPtr, outPtr, 0, &zeroSeed)
+	case 16:
+		unpack32_16(inPtr, outPtr, 0, &zeroSeed)
+	case 17:
+		unpack32_17(inPtr, outPtr, 0, &zeroSeed)
+	case 18:
+		unpack32_18(inPtr, outPtr, 0, &zeroSeed)
+	case 19:
+		unpack32_19(inPtr, outPtr, 0, &zeroSeed)
+	case 20:
+		unpack32_20(inPtr, outPtr, 0, &zeroSeed)
+	case 21:
+		unpack32_21(inPtr, outPtr, 0, &zeroSeed)
+	case 22:
+		unpack32_22(inPtr, outPtr, 0, &zeroSeed)
+	case 23:
+		unpack32_23(inPtr, outPtr, 0, &zeroSeed)
+	case 24:
+		unpack32_24(inPtr, outPtr, 0, &zeroSeed)
+	case 25:
+		unpack32_25(inPtr, outPtr, 0, &zeroSeed)
+	case 26:
+		unpack32_26(inPtr, outPtr, 0, &zeroSeed)
+	case 27:
+		unpack32_27(inPtr, outPtr, 0, &zeroSeed)
+	case 28:
+		unpack32_28(inPtr, outPtr, 0, &zeroSeed)
+	case 29:
+		unpack32_29(inPtr, outPtr, 0, &zeroSeed)
+	case 30:
+		unpack32_30(inPtr, outPtr, 0, &zeroSeed)
+	case 31:
+		unpack32_31(inPtr, outPtr, 0, &zeroSeed)
+	case 32:
+		unpack32_32(inPtr, outPtr, 0, &zeroSeed)
+	default:
+		return false
+	}
+
 	copy(dst[:count], valuesBuf[:count])
 	return true
 }
