@@ -12,7 +12,7 @@ import (
 func TestPackLengthValidation(t *testing.T) {
 	assert := assert.New(t)
 	assert.Panics(func() {
-		Pack(nil, make([]uint32, BlockSize+1))
+		Pack(nil, make([]uint32, blockSize+1))
 	})
 }
 
@@ -29,7 +29,7 @@ func TestPackUnpackShortBlock(t *testing.T) {
 }
 
 func TestPackUnpackFullBlock(t *testing.T) {
-	assertRoundTrip(t, genSequential(BlockSize))
+	assertRoundTrip(t, genSequential(blockSize))
 }
 
 func TestPackUnpackBitWidth32(t *testing.T) {
@@ -38,7 +38,7 @@ func TestPackUnpackBitWidth32(t *testing.T) {
 }
 
 func TestPackUnpackRandomData(t *testing.T) {
-	src := make([]uint32, BlockSize)
+	src := make([]uint32, blockSize)
 	rng := rand.New(rand.NewSource(42))
 	for i := range src {
 		src[i] = rng.Uint32()
@@ -47,34 +47,34 @@ func TestPackUnpackRandomData(t *testing.T) {
 }
 
 func TestPackUnpackWithExceptions(t *testing.T) {
-	src := make([]uint32, BlockSize)
+	src := make([]uint32, blockSize)
 	for i := range src {
 		src[i] = uint32(i % 7)
 	}
 	src[5] = 1 << 30
 	src[9] = 1<<29 + 123
 	buf := assertRoundTrip(t, src)
-	assertCompressionBelowRaw(t, buf, BlockSize*4)
+	assertCompressionBelowRaw(t, buf, blockSize*4)
 }
 
 func TestPackFullBlockSequentialCompression(t *testing.T) {
 	assert := assert.New(t)
-	src := genSequential(BlockSize)
+	src := genSequential(blockSize)
 	buf := assertRoundTrip(t, src)
 	const bitWidthSequential = 7
 	expectedBytes := headerBytes + payloadBytes(bitWidthSequential)
 	assert.Equal(expectedBytes, len(buf), "sequential block should compress deterministically")
-	assertCompressionBelowRaw(t, buf, BlockSize*4)
+	assertCompressionBelowRaw(t, buf, blockSize*4)
 }
 
 func TestPackFullBlockRandom16BitCompression(t *testing.T) {
-	src := make([]uint32, BlockSize)
+	src := make([]uint32, blockSize)
 	rng := rand.New(rand.NewSource(2025))
 	for i := range src {
 		src[i] = uint32(rng.Intn(1 << 16))
 	}
 	buf := assertRoundTrip(t, src)
-	assertCompressionBelowRaw(t, buf, BlockSize*4)
+	assertCompressionBelowRaw(t, buf, blockSize*4)
 }
 
 func TestPackUnpackDeltaEmpty(t *testing.T) {
@@ -82,24 +82,24 @@ func TestPackUnpackDeltaEmpty(t *testing.T) {
 }
 
 func TestPackUnpackDeltaMonotonic(t *testing.T) {
-	buf := assertDeltaRoundTrip(t, genMonotonic(BlockSize))
-	assertCompressionBelowRaw(t, buf, BlockSize*4)
+	buf := assertDeltaRoundTrip(t, genMonotonic(blockSize))
+	assertCompressionBelowRaw(t, buf, blockSize*4)
 }
 
 func TestPackUnpackDeltaMixed(t *testing.T) {
-	assertDeltaRoundTrip(t, genMixed(BlockSize))
+	assertDeltaRoundTrip(t, genMixed(blockSize))
 }
 
 func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 	assert := assert.New(t)
 	src := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
-	packScratch := make([]uint32, BlockSize)
+	packScratch := make([]uint32, blockSize)
 	buf := PackDelta(nil, src, packScratch)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	_, _, _, hasZigZag := decodeHeader(header)
 	assert.True(hasZigZag, "expected zigzag flag for negative deltas")
 
-	unpackScratch := make([]uint32, BlockSize)
+	unpackScratch := make([]uint32, blockSize)
 	got := UnpackDelta(nil, buf, unpackScratch)
 	assert.Equal(src, got, "zigzag delta round-trip mismatch")
 }
@@ -107,7 +107,7 @@ func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 func TestPackDeltaMonotonicDoesNotSetZigZag(t *testing.T) {
 	assert := assert.New(t)
 	src := genMonotonic(32)
-	packScratch := make([]uint32, BlockSize)
+	packScratch := make([]uint32, blockSize)
 	buf := PackDelta(nil, src, packScratch)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	_, _, _, hasZigZag := decodeHeader(header)
@@ -134,21 +134,21 @@ func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 		}
 	}
 
-	packScratch := make([]uint32, BlockSize)
+	packScratch := make([]uint32, blockSize)
 	buf := PackDelta(nil, src, packScratch)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	_, _, hasExceptions, hasZigZag := decodeHeader(header)
 	assert.True(hasZigZag, "expected zigzag flag when negative delta present")
 	assert.True(hasExceptions, "expected exceptions due to large zigzagged delta")
 
-	unpackScratch := make([]uint32, BlockSize)
+	unpackScratch := make([]uint32, blockSize)
 	got := UnpackDelta(nil, buf, unpackScratch)
 	assert.Equal(src, got, "zigzag delta with exceptions round-trip mismatch")
 }
 
 func TestPackBitWidthCoverage(t *testing.T) {
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
-	dst := make([]uint32, BlockSize)
+	dst := make([]uint32, blockSize)
 
 	for width := 2; width <= 32; width++ {
 		width := width
@@ -180,11 +180,11 @@ func TestPackBitWidthCoverage(t *testing.T) {
 func TestPackBitWidthExamples(t *testing.T) {
 	assert := assert.New(t)
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
-	dst := make([]uint32, BlockSize)
+	dst := make([]uint32, blockSize)
 
 	// Width 2 (no exceptions): simple repeating pattern that fits in two bits.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		for i := range src {
 			src[i] = uint32(i % 4)
 		}
@@ -202,7 +202,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 
 	// Width 5 (no exceptions): Fibonacci-like sequence staying within five bits.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		fibLike := []uint32{0, 1, 1, 2, 3, 5, 8, 13, 21, 31}
 		for i := range src {
 			src[i] = fibLike[i%len(fibLike)]
@@ -221,7 +221,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 
 	// Width 13 (no exceptions): quadratic sequence capped at 13 bits.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		for i := range src {
 			src[i] = uint32((i * i * 17) & ((1 << 13) - 1))
 		}
@@ -239,7 +239,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 
 	// Width 24 (no exceptions): multiplicative pattern covering 24 bits.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		for i := range src {
 			src[i] = uint32((i * 123456) & ((1 << 24) - 1))
 		}
@@ -257,7 +257,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 
 	// Width 32 (no exceptions): alternating max values forcing 32-bit packing.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		for i := range src {
 			if i%2 == 0 {
 				src[i] = mathMaxUint32
@@ -279,7 +279,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 
 	// Width 5 (with exceptions): low values plus a few spikes that trigger patches.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		for i := range src {
 			src[i] = uint32(16 + (i % 16))
 		}
@@ -299,7 +299,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 
 	// Width 13 (with exceptions): mostly 13-bit values with high outliers.
 	{
-		src := make([]uint32, BlockSize)
+		src := make([]uint32, blockSize)
 		for i := range src {
 			src[i] = uint32(4096 + (i % 4096))
 		}
@@ -320,8 +320,8 @@ func TestPackBitWidthExamples(t *testing.T) {
 }
 
 func TestPackDeltaFullBlockCompression(t *testing.T) {
-	buf := assertDeltaRoundTrip(t, genMonotonic(BlockSize))
-	assertCompressionBelowRaw(t, buf, BlockSize*4)
+	buf := assertDeltaRoundTrip(t, genMonotonic(blockSize))
+	assertCompressionBelowRaw(t, buf, blockSize*4)
 }
 
 func FuzzPackRoundTrip(f *testing.F) {
@@ -330,7 +330,7 @@ func FuzzPackRoundTrip(f *testing.F) {
 		{0},
 		{mathMaxUint32},
 		{1, 2, 3, 4, 5},
-		genSequential(BlockSize),
+		genSequential(blockSize),
 		genMixed(32),
 	}
 	for _, seed := range corpus {
@@ -352,7 +352,7 @@ func FuzzPackDeltaRoundTrip(f *testing.F) {
 		nil,
 		genMonotonic(8),
 		genMixed(8),
-		genMixed(BlockSize),
+		genMixed(blockSize),
 	}
 	for _, seed := range corpus {
 		if len(seed) == 0 {
@@ -392,7 +392,7 @@ func TestUnpackReusesDst(t *testing.T) {
 	assert := assert.New(t)
 	input := []uint32{5, 6, 7, 8}
 	buf := Pack(nil, input)
-	dst := make([]uint32, BlockSize)
+	dst := make([]uint32, blockSize)
 	out := Unpack(dst[:0], buf)
 	assert.Equal(len(input), len(out), "length mismatch")
 	if len(out) > 0 {
@@ -413,7 +413,7 @@ func TestUnpackRejectsShortBuffer(t *testing.T) {
 
 func TestPackWritesExceptionMetadata(t *testing.T) {
 	assert := assert.New(t)
-	data := make([]uint32, BlockSize)
+	data := make([]uint32, blockSize)
 	for i := range data {
 		data[i] = uint32(i & 15)
 	}
@@ -434,7 +434,7 @@ var (
 )
 
 func BenchmarkPack(b *testing.B) {
-	data := genSequential(BlockSize)
+	data := genSequential(blockSize)
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -444,8 +444,8 @@ func BenchmarkPack(b *testing.B) {
 }
 
 func BenchmarkUnpack(b *testing.B) {
-	buf := Pack(nil, genSequential(BlockSize))
-	dst := make([]uint32, 0, BlockSize)
+	buf := Pack(nil, genSequential(blockSize))
+	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		dst = Unpack(dst[:0], buf)
@@ -454,8 +454,8 @@ func BenchmarkUnpack(b *testing.B) {
 }
 
 func BenchmarkPackDelta(b *testing.B) {
-	data := genMonotonic(BlockSize)
-	scratch := make([]uint32, BlockSize)
+	data := genMonotonic(blockSize)
+	scratch := make([]uint32, blockSize)
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -465,10 +465,10 @@ func BenchmarkPackDelta(b *testing.B) {
 }
 
 func BenchmarkUnpackDelta(b *testing.B) {
-	packScratch := make([]uint32, BlockSize)
-	buf := PackDelta(nil, genMonotonic(BlockSize), packScratch)
-	deltaScratch := make([]uint32, BlockSize)
-	dst := make([]uint32, 0, BlockSize)
+	packScratch := make([]uint32, blockSize)
+	buf := PackDelta(nil, genMonotonic(blockSize), packScratch)
+	deltaScratch := make([]uint32, blockSize)
+	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		dst = UnpackDelta(dst[:0], buf, deltaScratch)
@@ -522,7 +522,7 @@ func genValuesForBitWidth(width int) []uint32 {
 	} else {
 		val = (1 << width) - 1
 	}
-	out := make([]uint32, BlockSize)
+	out := make([]uint32, blockSize)
 	for i := range out {
 		out[i] = val
 	}
@@ -533,7 +533,7 @@ func expandPatternToBlock(pattern []uint32) []uint32 {
 	if len(pattern) == 0 {
 		return nil
 	}
-	out := make([]uint32, BlockSize)
+	out := make([]uint32, blockSize)
 	for i := range out {
 		out[i] = pattern[i%len(pattern)]
 	}
@@ -559,9 +559,9 @@ func assertRoundTrip(t *testing.T, src []uint32) []byte {
 
 func assertDeltaRoundTrip(t *testing.T, src []uint32) []byte {
 	t.Helper()
-	packScratch := make([]uint32, BlockSize)
+	packScratch := make([]uint32, blockSize)
 	buf := PackDelta(nil, src, packScratch)
-	unpackScratch := make([]uint32, BlockSize)
+	unpackScratch := make([]uint32, blockSize)
 	got := UnpackDelta(nil, buf, unpackScratch)
 	assert.Equal(t, len(src), len(got), "length mismatch")
 	assert.Equal(t, src, got)
@@ -580,7 +580,7 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 	}
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	count, bitWidth, hasExceptions, _ := decodeHeader(header)
-	if count < 0 || count > BlockSize {
+	if count < 0 || count > blockSize {
 		t.Fatalf("invalid element count %d", count)
 	}
 	payloadLen := payloadBytes(bitWidth)
@@ -598,7 +598,7 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 		t.Fatalf("missing exception count byte")
 	}
 	excCount := int(buf[minLen])
-	if excCount > BlockSize {
+	if excCount > blockSize {
 		t.Fatalf("exception count %d exceeds block size", excCount)
 	}
 	want := minLen + 1 + excCount + excCount*4
@@ -612,8 +612,8 @@ func fuzzBytesToValues(data []byte) []uint32 {
 		return nil
 	}
 	count := (len(data) + 3) / 4
-	if count > BlockSize {
-		count = BlockSize
+	if count > blockSize {
+		count = blockSize
 	}
 	values := make([]uint32, count)
 	for i := 0; i < count; i++ {

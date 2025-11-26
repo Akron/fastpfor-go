@@ -5,7 +5,7 @@ package fastpfor
 import "testing"
 
 func TestSIMDPackRoundTrip(t *testing.T) {
-	if !Available() {
+	if !IsSIMDavailable() {
 		t.Skip("SIMD disabled")
 	}
 	for bitWidth := 1; bitWidth <= 16; bitWidth += 5 {
@@ -31,7 +31,7 @@ func TestSIMDPackRoundTrip(t *testing.T) {
 }
 
 func TestSIMDPackRoundTripShort(t *testing.T) {
-	if !Available() {
+	if !IsSIMDavailable() {
 		t.Skip("SIMD disabled")
 	}
 	values := []uint32{1, 2, 3, 0, 1}

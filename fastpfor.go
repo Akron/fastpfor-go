@@ -23,45 +23,70 @@ import (
 // Block configuration constants. Pack/Unpack always operates on at most 128
 // integers, interleaved into 4 pseudo lanes to match the SIMD-PFOR layout.
 const (
-	BlockSize  = 128
-	laneCount  = 4
-	laneLength = BlockSize / laneCount
+	// blockSize is the fixed FastPFOR block length (4 lanes × 32 elements).
+	blockSize = 128
+	// laneCount splits blocks into four pseudo-lanes so SIMD-friendly packing can interleave them.
+	laneCount = 4
+	// laneLength is the number of integers stored per lane.
+	laneLength = blockSize / laneCount
 
 	// headerBytes is the number of bytes reserved for the block header. The
 	// serialized 32-bit header stores
 	//   (a) the logical element count,
 	//   (b) the per-lane bit width used for packing,
-	//   (c) flag bits that describe optional sections (exceptions, delta markers, etc).
+	//   (c) flag bits that describe optional sections (exceptions, zigzag markers, etc).
 	headerBytes = 4
 
+	// headerCountBits reserves 8 bits in the header for the logical value count (<= 128).
 	headerCountBits = 8
+	// headerWidthBits reserves 6 bits for the packed bit width (enough to cover 0–32).
 	headerWidthBits = 6
 
-	headerCountMask  = (1 << headerCountBits) - 1
-	headerWidthMask  = (1 << headerWidthBits) - 1
+	// headerCountMask isolates the element-count field inside the header word.
+	headerCountMask = (1 << headerCountBits) - 1
+	// headerWidthMask isolates the bit-width field inside the header word.
+	headerWidthMask = (1 << headerWidthBits) - 1
+	// headerWidthShift offsets the width bits immediately after the count bits.
 	headerWidthShift = headerCountBits
 
+	// headerExceptionFlag marks that the block contains a trailing exception table.
 	headerExceptionFlag = uint32(1 << 31)
-	headerZigZagFlag    = uint32(1 << 30)
 
-	// mathMaxUint32 helps avoid repeated casts when constructing bit masks.
+	// headerZigZagFlag marks that the block stores zigzag-encoded deltas.
+	headerZigZagFlag = uint32(1 << 30)
+
+	// mathMaxUint32 is the maximum uint32, used while constructing bit masks without conversions.
 	mathMaxUint32 = ^uint32(0)
-	maxInt32      = int64(1<<31 - 1)
-	minInt32      = -1 << 31
+	// maxInt32 caches math.MaxInt32 as an int64 for delta/zigzag helpers.
+	maxInt32 = int64(1<<31 - 1)
+	// minInt32 caches math.MinInt32 as an int64 companion to maxInt32.
+	minInt32 = -1 << 31
 )
+
+// packLanes splits the block into four SIMD-friendly lanes and bit-packs each
+// lane independently. Missing tail values (len < 128) are treated as zeros.
+var packLanes func(dst []byte, values []uint32, bitWidth int) = packLanesScalar
+
+// unpackLanes performs the inverse of packLanes, up to the logical element
+// count (tail values outside count retain their previous contents).
+var unpackLanes func(dst []uint32, payload []byte, count, bitWidth int) = unpackLanesScalar
+
+// requiredBitWidth returns the minimum number of bits needed to encode every
+// value in the slice without exceptions.
+var requiredBitWidth func(values []uint32) int = requiredBitWidthScalar
 
 var (
-	packLanesImpl   = packLanesScalar
-	unpackLanesImpl = unpackLanesScalar
-	simdAvailable   bool
+	simdAvailable bool
+	bo            = binary.LittleEndian
 )
 
+// Initialize SIMD path if available
 func init() {
 	initSIMDSelection()
 }
 
-// Available reports whether SIMD-accelerated pack/unpack paths are active.
-func Available() bool {
+// IsSIMDavailable reports whether SIMD-accelerated pack/unpack paths are active.
+func IsSIMDavailable() bool {
 	return simdAvailable
 }
 
@@ -71,8 +96,6 @@ type exception struct {
 	index uint8
 	high  uint32
 }
-
-var bo = binary.LittleEndian
 
 // Pack encodes up to BlockSize uint32 values into the FastPFOR block format.
 // The function appends the block to dst so the caller can reuse buffers and
@@ -202,8 +225,8 @@ func validateBlockLength(n int) {
 	if n < 0 {
 		panic(fmt.Sprintf("fastpfor: invalid block length %d (cannot be negative)", n))
 	}
-	if n > BlockSize {
-		panic(fmt.Sprintf("fastpfor: block length %d exceeds maximum %d", n, BlockSize))
+	if n > blockSize {
+		panic(fmt.Sprintf("fastpfor: block length %d exceeds maximum %d", n, blockSize))
 	}
 }
 
@@ -279,18 +302,6 @@ func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, h
 	return
 }
 
-// packLanes splits the block into four SIMD-friendly lanes and bit-packs each
-// lane independently. Missing tail values (len < 128) are treated as zeros.
-func packLanes(dst []byte, values []uint32, bitWidth int) {
-	packLanesImpl(dst, values, bitWidth)
-}
-
-func packLanesSIMDPreferred(dst []byte, values []uint32, bitWidth int) {
-	if !simdPack(dst, values, bitWidth) {
-		packLanesScalar(dst, values, bitWidth)
-	}
-}
-
 func packLanesScalar(dst []byte, values []uint32, bitWidth int) {
 	// Reference (FastPFor.cpp):
 	//
@@ -349,18 +360,6 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 	}
 	if bitsInAcc > 0 {
 		bo.PutUint32(output[outIdx:], uint32(acc))
-	}
-}
-
-// unpackLanes performs the inverse of packLanes, up to the logical element
-// count (tail values outside count retain their previous contents).
-func unpackLanes(dst []uint32, payload []byte, count, bitWidth int) {
-	unpackLanesImpl(dst, payload, count, bitWidth)
-}
-
-func unpackLanesSIMDPreferred(dst []uint32, payload []byte, count, bitWidth int) {
-	if !simdUnpack(dst, payload, bitWidth, count) {
-		unpackLanesScalar(dst, payload, count, bitWidth)
 	}
 }
 
@@ -442,7 +441,7 @@ func selectBitWidth(values []uint32) (width int, exceptions []exception) {
 	bestWidth := maxWidth
 	bestSize := headerBytes + payloadBytes(maxWidth)
 	var bestExc []exception
-	var scratch [BlockSize]exception
+	var scratch [blockSize]exception
 
 	for candidate := 0; candidate <= maxWidth; candidate++ {
 		exc := collectExceptions(values, candidate, scratch[:0])

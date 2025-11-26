@@ -9,14 +9,15 @@ import (
 )
 
 const (
-	blockSize       = 128
+	// maxPayloadBytes is the largest lane payload emitted by the SIMD kernels (32-bit width × 16 words).
 	maxPayloadBytes = 32 * 16
 )
 
 func initSIMDSelection() {
 	if cpu.X86.HasSSE2 {
-		packLanesImpl = packLanesSIMDPreferred
-		unpackLanesImpl = unpackLanesSIMDPreferred
+		packLanes = packLanesSIMDPreferred
+		unpackLanes = unpackLanesSIMDPreferred
+		requiredBitWidth = requiredBitWidthSIMD
 		simdAvailable = true
 		return
 	}
@@ -218,6 +219,12 @@ func unpack32_32(in *byte, out uintptr, offset int, seed *byte)
 
 var zeroSeed byte
 
+func packLanesSIMDPreferred(dst []byte, values []uint32, bitWidth int) {
+	if !simdPack(dst, values, bitWidth) {
+		packLanesScalar(dst, values, bitWidth)
+	}
+}
+
 // simdPack encodes up to 128 uint32 values (zero-filled) into dst using SIMD bit packing.
 // dst must have space for bitWidth*16 bytes (same as scalar payload).
 func simdPack(dst []byte, values []uint32, bitWidth int) bool {
@@ -315,6 +322,12 @@ func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 
 	copy(dst[:needed], payloadBuf[:needed])
 	return true
+}
+
+func unpackLanesSIMDPreferred(dst []uint32, payload []byte, count, bitWidth int) {
+	if !simdUnpack(dst, payload, bitWidth, count) {
+		unpackLanesScalar(dst, payload, count, bitWidth)
+	}
 }
 
 // simdUnpack decodes a SIMD-packed payload into dst (count <= 128).
@@ -415,7 +428,7 @@ func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 func alignedUint32Slice(storage *[blockSize + 4]uint32) []uint32 {
 	base := uintptr(unsafe.Pointer(storage))
 	aligned := align16(base)
-	const elemSize = int(unsafe.Sizeof(uint32(0)))
+	const elemSize = int(unsafe.Sizeof(uint32(0))) // size of an element for offset conversion
 	offset := int(aligned - base)
 	start := offset / elemSize
 	return storage[start : start+blockSize]
@@ -429,24 +442,18 @@ func alignedByteSlice(storage *[maxPayloadBytes + 16]byte) []byte {
 }
 
 func align16(ptr uintptr) uintptr {
-	const mask = 16 - 1
+	const mask = 16 - 1 // mask to round up to the next 16-byte boundary
 	return (ptr + mask) &^ mask
 }
 
 //go:noescape
 func maxBits128_32(in uintptr, offset int, seed *byte) uint8
 
-var requiredBitWidthImpl = requiredBitWidthScalar
-
-func init() {
-	if cpu.X86.HasSSE2 {
-		requiredBitWidthImpl = requiredBitWidthSIMD
-	}
-}
-
+/*
 func requiredBitWidth(values []uint32) int {
 	return requiredBitWidthImpl(values)
 }
+*/
 
 // requiredBitWidthSIMD returns the minimum number of bits in the block using
 // the SIMD-oriented maxBits128 kernel.
