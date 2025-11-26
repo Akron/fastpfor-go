@@ -99,8 +99,7 @@ func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 	_, _, _, hasZigZag := decodeHeader(header)
 	assert.True(hasZigZag, "expected zigzag flag for negative deltas")
 
-	unpackScratch := make([]uint32, blockSize)
-	got := UnpackDelta(nil, buf, unpackScratch)
+	got := UnpackDelta(nil, buf)
 	assert.Equal(src, got, "zigzag delta round-trip mismatch")
 }
 
@@ -141,8 +140,7 @@ func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 	assert.True(hasZigZag, "expected zigzag flag when negative delta present")
 	assert.True(hasExceptions, "expected exceptions due to large zigzagged delta")
 
-	unpackScratch := make([]uint32, blockSize)
-	got := UnpackDelta(nil, buf, unpackScratch)
+	got := UnpackDelta(nil, buf)
 	assert.Equal(src, got, "zigzag delta with exceptions round-trip mismatch")
 }
 
@@ -467,11 +465,10 @@ func BenchmarkPackDelta(b *testing.B) {
 func BenchmarkUnpackDelta(b *testing.B) {
 	packScratch := make([]uint32, blockSize)
 	buf := PackDelta(nil, genMonotonic(blockSize), packScratch)
-	deltaScratch := make([]uint32, blockSize)
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		dst = UnpackDelta(dst[:0], buf, deltaScratch)
+		dst = UnpackDelta(dst[:0], buf)
 	}
 	resultU32 = dst
 }
@@ -561,8 +558,7 @@ func assertDeltaRoundTrip(t *testing.T, src []uint32) []byte {
 	t.Helper()
 	packScratch := make([]uint32, blockSize)
 	buf := PackDelta(nil, src, packScratch)
-	unpackScratch := make([]uint32, blockSize)
-	got := UnpackDelta(nil, buf, unpackScratch)
+	got := UnpackDelta(nil, buf)
 	assert.Equal(t, len(src), len(got), "length mismatch")
 	assert.Equal(t, src, got)
 	return buf

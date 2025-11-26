@@ -449,12 +449,6 @@ func align16(ptr uintptr) uintptr {
 //go:noescape
 func maxBits128_32(in uintptr, offset int, seed *byte) uint8
 
-/*
-func requiredBitWidth(values []uint32) int {
-	return requiredBitWidthImpl(values)
-}
-*/
-
 // requiredBitWidthSIMD returns the minimum number of bits in the block using
 // the SIMD-oriented maxBits128 kernel.
 func requiredBitWidthSIMD(values []uint32) int {

@@ -202,21 +202,20 @@ func PackDelta(dst []byte, values []uint32, scratch []uint32) []byte {
 	return packInternal(dst, scratch[:len(values)], flags)
 }
 
-// UnpackDelta reverses PackDelta by unpacking into the provided scratch space
-// first and then performing a prefix sum to reconstruct the original values.
-func UnpackDelta(dst []uint32, buf []byte, scratch []uint32) []uint32 {
+// UnpackDelta reverses PackDelta by unpacking the delta stream and then
+// performing a prefix sum (optionally zigzag-decoded) in place.
+func UnpackDelta(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
 		panic(fmt.Sprintf("fastpfor: UnpackDelta buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
 	header := bo.Uint32(buf[:headerBytes])
 	_, _, _, useZigZag := decodeHeader(header)
-	deltas := Unpack(scratch[:0], buf)
-	if len(deltas) == 0 {
-		return dst[:0]
+	dst = Unpack(dst[:0], buf)
+	if len(dst) == 0 {
+		return dst
 	}
-	dst = ensureUint32Len(dst, len(deltas))
-	deltaDecode(dst[:len(deltas)], deltas, useZigZag)
-	return dst[:len(deltas)]
+	deltaDecode(dst, dst, useZigZag)
+	return dst
 }
 
 // validateBlockLength panics if the caller tries to encode more than BlockSize
