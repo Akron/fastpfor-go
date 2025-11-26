@@ -230,9 +230,9 @@ func ensureUint32Len(dst []uint32, n int) []uint32 {
 	return make([]uint32, n)
 }
 
-// requiredBitWidth returns the minimum number of bits needed to encode every
+// requiredBitWidthScalar returns the minimum number of bits needed to encode every
 // value in the slice without exceptions.
-func requiredBitWidth(values []uint32) int {
+func requiredBitWidthScalar(values []uint32) int {
 	var width int
 	for _, v := range values {
 		if v == 0 {

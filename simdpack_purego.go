@@ -11,3 +11,7 @@ func simdPack(_ []byte, _ []uint32, _ int) bool {
 func simdUnpack(_ []uint32, _ []byte, _, _ int) bool {
 	return false
 }
+
+func requiredBitWidth(values []uint32) int {
+	return requiredBitWidthScalar(values)
+}
