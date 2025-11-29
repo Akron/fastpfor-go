@@ -404,54 +404,83 @@ func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
 }
 
 // selectBitWidth picks the bit width that minimizes the serialized size. It
-// mirrors FastPFOR's getBestBFromData routine.
-// We follow the same logic: iterate every candidate width, collect exceptions,
-// compute header+payload+patch bytes, and prefer smaller widths on ties to keep
-// SIMD packing efficient.
+// mirrors FastPFOR's getBestBFromData routine by computing the histogram of bit
+// lengths once, deriving the exception counts for each candidate width from
+// that histogram, and only materializing the exception list for the winning
+// width.
 func selectBitWidth(values []uint32) (width int, exceptions []exception) {
+
+	/*
+	   void getBestBFromData(const IntType *in, uint8_t &bestb, uint8_t &bestcexcept,
+	                         uint8_t &maxb) {
+	     uint8_t bits = sizeof(IntType) * 8;
+	     uint32_t freqs[65];
+	     for (uint32_t k = 0; k <= bits; ++k) freqs[k] = 0;
+	     for (uint32_t k = 0; k < BlockSize; ++k) {
+	       freqs[asmbits(in[k])]++;
+	     }
+	     bestb = bits;
+	     while (freqs[bestb] == 0) bestb--;
+	     maxb = bestb;
+	     uint32_t bestcost = bestb * BlockSize;
+	     uint32_t cexcept = 0;
+	     bestcexcept = static_cast<uint8_t>(cexcept);
+	     for (uint32_t b = bestb - 1; b < bits; --b) {
+	       cexcept += freqs[b + 1];
+	       uint32_t thiscost = cexcept * overheadofeachexcept +
+	                           cexcept * (maxb - b) + b * BlockSize +
+	                           8;  // the  extra 8 is the cost of storing maxbits
+	       if (maxb - b == 1) thiscost -= cexcept;
+	       if (thiscost < bestcost) {
+	         bestcost = thiscost;
+	         bestb = static_cast<uint8_t>(b);
+	         bestcexcept = static_cast<uint8_t>(cexcept);
+	       }
+	     }
+	   }
+	*/
+
+	const uint32Bits = 32
 
 	maxWidth := requiredBitWidth(values)
 	bestWidth := maxWidth
 	bestSize := headerBytes + payloadBytes(maxWidth)
-	var bestExc []exception
-	var scratch [blockSize]exception
+	bestExcCount := 0
 
-	/*
-	   uint8_t bits = sizeof(IntType) * 8;
-	   uint32_t freqs[65];
-	   for (uint32_t k = 0; k <= bits; ++k) freqs[k] = 0;
-	   for (uint32_t k = 0; k < BlockSize; ++k) {
-	     freqs[asmbits(in[k])]++;
-	   }
-	   bestb = bits;
-	   while (freqs[bestb] == 0) bestb--;
-	   maxb = bestb;
-	   uint32_t bestcost = bestb * BlockSize;
-	   uint32_t cexcept = 0;
-	   bestcexcept = static_cast<uint8_t>(cexcept);
-	   for (uint32_t b = bestb - 1; b < bits; --b) {
-	     cexcept += freqs[b + 1];
-	     uint32_t thiscost = cexcept * overheadofeachexcept +
-	                         cexcept * (maxb - b) + b * BlockSize +
-	                         8;  // the  extra 8 is the cost of storing maxbits
-	     if (maxb - b == 1) thiscost -= cexcept;
-	     if (thiscost < bestcost) {
-	       bestcost = thiscost;
-	       bestb = static_cast<uint8_t>(b);
-	       bestcexcept = static_cast<uint8_t>(cexcept);
-	     }
-	   }
-	*/
-	for candidate := 0; candidate <= maxWidth; candidate++ {
-		exc := collectExceptions(values, candidate, scratch[:0])
-		size := headerBytes + payloadBytes(candidate) + patchBytes(len(exc))
+	// Initialize the histogram of bit lengths
+	var freqs [uint32Bits + 1]int
+	for _, v := range values {
+		freqs[bits.Len32(v)]++
+	}
+
+	var greater [uint32Bits + 1]int
+	var running int
+	for bit := uint32Bits; bit >= 0; bit-- {
+		greater[bit] = running
+		running += freqs[bit]
+	}
+
+	// Check for the optimal bitwidth candidate
+	for candidate := range maxWidth {
+		excCount := greater[candidate]
+
+		// If there are no exceptions for this bit width, skip it
+		if excCount == 0 {
+			continue
+		}
+		size := headerBytes + payloadBytes(candidate) + patchBytes(excCount)
 		if size < bestSize || (size == bestSize && candidate < bestWidth) {
 			bestSize = size
 			bestWidth = candidate
-			bestExc = append(bestExc[:0], exc...)
+			bestExcCount = excCount
 		}
 	}
-	return bestWidth, bestExc
+
+	if bestWidth == maxWidth {
+		return bestWidth, nil
+	}
+	buf := make([]exception, 0, bestExcCount)
+	return bestWidth, collectExceptions(values, bestWidth, buf)
 }
 
 // collectExceptions builds the exception list for the provided bit width using
