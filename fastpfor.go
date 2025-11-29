@@ -5,13 +5,7 @@
 // lane sets followed by the interleaved payload (4 SIMD-friendly lanes) and a
 // patch area for exception values. Callers provide the destination slices to
 // Pack/Unpack so higher-level codecs can reuse buffers without repeated heap
-// allocations. The package maintains no global mutable state, so Pack, Unpack
-// and their delta variants are safe for concurrent use as long as each
-// goroutine owns the dst/scratch slices it passes in.
-//
-// References:
-//   - https://ayende.com/blog/199523-C/integer-compression-understanding-fastpfor
-//   - https://ayende.com/blog/199524-C/integer-compression-the-fastpfor-code
+// allocations. The package maintains no global mutable state.
 package fastpfor
 
 import (
@@ -21,7 +15,7 @@ import (
 )
 
 // Block configuration constants. Pack/Unpack always operates on at most 128
-// integers, interleaved into 4 pseudo lanes to match the SIMD-PFOR layout.
+// integers, interleaved into 4 lanes to match the SIMD-PFOR layout.
 const (
 	// blockSize is the fixed FastPFOR block length (4 lanes × 32 elements).
 	blockSize = 128
@@ -31,9 +25,9 @@ const (
 	laneLength = blockSize / laneCount
 
 	// headerBytes is the number of bytes reserved for the block header. The
-	// serialized 32-bit header stores
-	//   (a) the logical element count,
-	//   (b) the per-lane bit width used for packing,
+	// serialized 32-bit (word-aligned) header stores
+	//   (a) the logical element count (0–127) in 8 bits,
+	//   (b) the per-lane bit width used for packing (0–32) in 6 bits,
 	//   (c) flag bits that describe optional sections (exceptions, zigzag markers, etc).
 	headerBytes = 4
 
@@ -91,7 +85,7 @@ func IsSIMDavailable() bool {
 }
 
 // exception tracks a single patched integer: its index in the block and the
-// high bits that must be re-applied after unpacking the truncated value.
+// high bits that must be re-applied (OR-ed) after unpacking the truncated value.
 type exception struct {
 	index uint8
 	high  uint32
@@ -109,13 +103,21 @@ func Pack(dst []byte, values []uint32) []byte {
 	return packInternal(dst, values, 0)
 }
 
+// packInternal is called by higher codecs. It validates the block length,
+// selects the bit width, and packs the payload. It also appends the exception
+// table if there are any exceptions.
 func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	validateBlockLength(len(values))
+	// Select the bit width that minimizes the serialized size.
+	// This will also collect the exceptions.
 	bitWidth, exceptions := selectBitWidth(values)
+	// Calculate the length of the payload
 	payloadLen := payloadBytes(bitWidth)
+	// Calculate the total length of the block
 	total := headerBytes + payloadLen + patchBytes(len(exceptions))
 
 	var start int
+	// TODO: Maybe not necessary
 	dst, start = appendSpace(dst, total)
 	flags := extraFlags
 	if len(exceptions) > 0 {
@@ -141,8 +143,7 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
 		panic(fmt.Sprintf("fastpfor: Unpack buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
-	header := bo.Uint32(buf[:headerBytes])
-	count, bitWidth, hasExceptions, _ := decodeHeader(header)
+	count, bitWidth, hasExceptions, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	validateBlockLength(count)
 
 	payloadLen := payloadBytes(bitWidth)
@@ -156,23 +157,24 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 		return dst[:0]
 	}
 	if bitWidth == 0 {
-		for i := range count {
-			dst[i] = 0
-		}
+		clear(dst)
 	} else {
 		unpackLanes(dst[:count], buf[headerBytes:minNeeded], count, bitWidth)
 	}
 
+	// Handle exceptions
 	if hasExceptions {
 		if len(buf) < minNeeded+1 {
 			panic(fmt.Sprintf("fastpfor: Unpack missing exception count byte at offset %d", minNeeded))
 		}
 		patch := buf[minNeeded:]
-		excCount := int(patch[0])
+		excCount := int(patch[0]) // Get the number of exceptions <= 128
+
 		patch = patch[1:]
 		if len(patch) < excCount {
 			panic(fmt.Sprintf("fastpfor: Unpack truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
 		}
+		// Read and apply the exceptions
 		positions := patch[:excCount]
 		patch = patch[excCount:]
 		valueBytes := excCount * 4
@@ -245,6 +247,7 @@ func appendSpace(dst []byte, extra int) ([]byte, int) {
 	return dst, start
 }
 
+// ensureUint32Len ensures the destination slice has at least n uint32 elements.
 func ensureUint32Len(dst []uint32, n int) []uint32 {
 	if cap(dst) >= n {
 		return dst[:n]
@@ -287,12 +290,14 @@ func patchBytes(exceptionCount int) int {
 	return 1 + exceptionCount + exceptionCount*4
 }
 
+// encodeHeader encodes the header for a block. It combines the count, bit width, and flags.
 func encodeHeader(count, bitWidth int, flags uint32) uint32 {
 	return uint32(count&headerCountMask) |
 		(uint32(bitWidth&headerWidthMask) << headerWidthShift) |
 		flags
 }
 
+// decodeHeader decodes the header for a block. It extracts the count, bit width, and flags.
 func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, hasZigZag bool) {
 	count = int(header & headerCountMask)
 	bitWidth = int((header >> headerWidthShift) & headerWidthMask)
@@ -301,15 +306,16 @@ func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, h
 	return
 }
 
+// packLanesScalar packs the values into the destination buffer using a scalar implementation.
 func packLanesScalar(dst []byte, values []uint32, bitWidth int) {
-	// Reference (FastPFor.cpp):
-	//
-	//	for(uint32_t k = 0; k < 4; ++k)
-	//	  fastpackwithoutmask(in+4*i+k, out + k*bits, bits);
 	if bitWidth == 0 {
 		return
 	}
 	bytesPerLane := len(dst) / laneCount
+	// Reference (FastPFor.cpp):
+	//
+	//	for(uint32_t k = 0; k < 4; ++k)
+	//	  fastpackwithoutmask(in+4*i+k, out + k*bits, bits);
 	for lane := range laneCount {
 		packLaneScalar(dst[lane*bytesPerLane:(lane+1)*bytesPerLane], values, lane, bitWidth)
 	}
@@ -318,18 +324,6 @@ func packLanesScalar(dst []byte, values []uint32, bitWidth int) {
 // packLaneScalar packs 32 integers taken from the specified lane (lane, lane+4, …)
 // into the destination buffer using a streaming 64-bit accumulator.
 func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
-	// Rough C++ equivalent (FastPFor.cpp::fastpackwithoutmask):
-	//
-	//	for(uint32_t i = 0; i < 32; ++i) {
-	//	  const uint64_t value = input[i] & mask;
-	//	  buffer |= value << bitOffset;
-	//	  if(bitOffset >= 32) { *out++ = uint32_t(buffer); buffer >>= 32; bitOffset -= 32; }
-	//	  bitOffset += bitWidth;
-	//	}
-	if bitWidth == 0 {
-		return
-	}
-
 	// Precompute mask outside the loop to avoid repeated conditional checks
 	var mask uint64
 	if bitWidth >= 32 {
@@ -341,6 +335,15 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 	var acc uint64
 	var bitsInAcc int
 	outIdx := 0
+
+	// Rough C++ equivalent (FastPFor.cpp::fastpackwithoutmask):
+	//
+	//	for(uint32_t i = 0; i < 32; ++i) {
+	//	  const uint64_t value = input[i] & mask;
+	//	  buffer |= value << bitOffset;
+	//	  if(bitOffset >= 32) { *out++ = uint32_t(buffer); buffer >>= 32; bitOffset -= 32; }
+	//	  bitOffset += bitWidth;
+	//	}
 
 	for i := range laneLength {
 		idx := lane + i*laneCount
@@ -362,6 +365,7 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 	}
 }
 
+// unpackLanesScalar unpacks the values from the payload into the destination buffer using a scalar implementation.
 func unpackLanesScalar(dst []uint32, payload []byte, count, bitWidth int) {
 	if bitWidth == 0 {
 		for i := range count {
@@ -379,16 +383,6 @@ func unpackLanesScalar(dst []uint32, payload []byte, count, bitWidth int) {
 // them back into dst at the interleaved lane offsets. Mirrors packLane but in
 // reverse order (a literal translation of FastPFor.cpp::fastunpack)
 func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
-	//	for(uint32_t i = 0; i < 32; ++i) {
-	//	  while(bitOffset < bitWidth) { buffer |= (uint64_t)(*in++) << bitOffset; bitOffset += 32; }
-	//	  output[i] = uint32_t(buffer) & mask;
-	//	  buffer >>= bitWidth;
-	//	  bitOffset -= bitWidth;
-	//	}
-	if bitWidth == 0 {
-		return
-	}
-
 	// Precompute mask outside the loop to avoid repeated conditional checks
 	var mask uint32
 	if bitWidth >= 32 {
@@ -396,6 +390,13 @@ func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
 	} else {
 		mask = (1 << bitWidth) - 1
 	}
+
+	//	for(uint32_t i = 0; i < 32; ++i) {
+	//	  while(bitOffset < bitWidth) { buffer |= (uint64_t)(*in++) << bitOffset; bitOffset += 32; }
+	//	  output[i] = uint32_t(buffer) & mask;
+	//	  buffer >>= bitWidth;
+	//	  bitOffset -= bitWidth;
+	//	}
 
 	var acc uint64
 	var bitsInAcc int
@@ -427,14 +428,6 @@ func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
 // compute header+payload+patch bytes, and prefer smaller widths on ties to keep
 // SIMD packing efficient.
 func selectBitWidth(values []uint32) (width int, exceptions []exception) {
-	//
-	//	for(int b = 0; b <= maxb; ++b) {
-	//	  c = countOccurenceOfMostSignificantBit(b);
-	//	  bitsRequired = 4 + 4*lanes*((b*32 + 31)/32);
-	//	  bitsRequired += 8*c;
-	//	  pick smallest bitsRequired, break ties with smaller b.
-	//	}
-	//
 
 	maxWidth := requiredBitWidth(values)
 	bestWidth := maxWidth
@@ -442,6 +435,32 @@ func selectBitWidth(values []uint32) (width int, exceptions []exception) {
 	var bestExc []exception
 	var scratch [blockSize]exception
 
+	/*
+	   uint8_t bits = sizeof(IntType) * 8;
+	   uint32_t freqs[65];
+	   for (uint32_t k = 0; k <= bits; ++k) freqs[k] = 0;
+	   for (uint32_t k = 0; k < BlockSize; ++k) {
+	     freqs[asmbits(in[k])]++;
+	   }
+	   bestb = bits;
+	   while (freqs[bestb] == 0) bestb--;
+	   maxb = bestb;
+	   uint32_t bestcost = bestb * BlockSize;
+	   uint32_t cexcept = 0;
+	   bestcexcept = static_cast<uint8_t>(cexcept);
+	   for (uint32_t b = bestb - 1; b < bits; --b) {
+	     cexcept += freqs[b + 1];
+	     uint32_t thiscost = cexcept * overheadofeachexcept +
+	                         cexcept * (maxb - b) + b * BlockSize +
+	                         8;  // the  extra 8 is the cost of storing maxbits
+	     if (maxb - b == 1) thiscost -= cexcept;
+	     if (thiscost < bestcost) {
+	       bestcost = thiscost;
+	       bestb = static_cast<uint8_t>(b);
+	       bestcexcept = static_cast<uint8_t>(cexcept);
+	     }
+	   }
+	*/
 	for candidate := 0; candidate <= maxWidth; candidate++ {
 		exc := collectExceptions(values, candidate, scratch[:0])
 		size := headerBytes + payloadBytes(candidate) + patchBytes(len(exc))
@@ -483,13 +502,17 @@ func writeExceptions(dst []byte, exceptions []exception) {
 	if len(exceptions) == 0 {
 		return
 	}
+
+	// Number of exceptions in the block
 	dst[0] = byte(len(exceptions))
 	pos := 1
 	for _, ex := range exceptions {
+		// Index of the exception in the block (always <= 127)
 		dst[pos] = byte(ex.index)
 		pos++
 	}
 	for _, ex := range exceptions {
+		// High bits of the exception value to be ORed
 		bo.PutUint32(dst[pos:], ex.high)
 		pos += 4
 	}
@@ -503,8 +526,8 @@ func applyExceptions(dst []uint32, positions []byte, values []byte, bitWidth int
 		if int(idx) >= len(dst) {
 			panic(fmt.Sprintf("fastpfor: exception index %d out of range (max %d)", int(idx), len(dst)-1))
 		}
-		high := bo.Uint32(values[i*4:])
-		dst[int(idx)] |= high << bitWidth
+		// OR the high bits of the exception value into the unpacked value at the specified index
+		dst[int(idx)] |= bo.Uint32(values[i*4:]) << bitWidth
 	}
 }
 
