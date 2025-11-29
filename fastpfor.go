@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/bits"
+	"slices"
 )
 
 // Block configuration constants. Pack/Unpack always operates on at most 128
@@ -117,7 +118,8 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	total := headerBytes + payloadLen + patchBytes(len(exceptions))
 
 	start := len(dst)
-	dst = append(dst, make([]byte, total)...)
+	dst = slices.Grow(dst, total)
+	dst = dst[:start+total]
 	flags := extraFlags
 	if len(exceptions) > 0 {
 		flags |= headerExceptionFlag

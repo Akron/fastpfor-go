@@ -435,7 +435,7 @@ func BenchmarkPack(b *testing.B) {
 	data := genSequential(blockSize)
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		dst = Pack(dst[:0], data)
 	}
 	resultBytes = dst
@@ -445,7 +445,7 @@ func BenchmarkUnpack(b *testing.B) {
 	buf := Pack(nil, genSequential(blockSize))
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		dst = Unpack(dst[:0], buf)
 	}
 	resultU32 = dst
@@ -456,7 +456,7 @@ func BenchmarkPackDelta(b *testing.B) {
 	scratch := make([]uint32, blockSize)
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		dst = PackDelta(dst[:0], data, scratch)
 	}
 	resultBytes = dst
@@ -467,7 +467,7 @@ func BenchmarkUnpackDelta(b *testing.B) {
 	buf := PackDelta(nil, genMonotonic(blockSize), packScratch)
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		dst = UnpackDelta(dst[:0], buf)
 	}
 	resultU32 = dst
@@ -607,20 +607,13 @@ func fuzzBytesToValues(data []byte) []uint32 {
 	if len(data) == 0 {
 		return nil
 	}
-	count := (len(data) + 3) / 4
-	if count > blockSize {
-		count = blockSize
-	}
+	count := min((len(data)+3)/4, blockSize)
 	values := make([]uint32, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		start := i * 4
 		var v uint32
-		for b := 0; b < 4; b++ {
-			idx := start + b
-			if idx >= len(data) {
-				break
-			}
-			v |= uint32(data[idx]) << (8 * b)
+		for b := range min(4, len(data)-start) {
+			v |= uint32(data[start+b]) << (8 * b)
 		}
 		values[i] = v
 	}
