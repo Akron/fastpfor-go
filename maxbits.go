@@ -1,4 +1,4 @@
-package bp128
+package fastpfor
 
 // maxBits128 computes the bit size of the largest element of
 // the input block. seed parameter is not used.

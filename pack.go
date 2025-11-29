@@ -1,4 +1,4 @@
-package bp128
+package fastpfor
 
 func pack32_0(in uintptr, out *byte, offset int, seed *byte) {}
 func pack32_1(in uintptr, out *byte, offset int, seed *byte)
