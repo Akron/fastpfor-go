@@ -52,10 +52,6 @@ const (
 
 	// mathMaxUint32 is the maximum uint32, used while constructing bit masks without conversions.
 	mathMaxUint32 = ^uint32(0)
-	// maxInt32 caches math.MaxInt32 as an int64 for delta/zigzag helpers.
-	maxInt32 = int64(1<<31 - 1)
-	// minInt32 caches math.MinInt32 as an int64 companion to maxInt32.
-	minInt32 = -1 << 31
 )
 
 // packLanes splits the block into four SIMD-friendly lanes and bit-packs each
@@ -547,22 +543,14 @@ func applyExceptions(dst []uint32, positions []byte, values []byte, bitWidth int
 func deltaEncode(dst, src []uint32) bool {
 	var prev uint32
 	needZigZag := false
-	fitsInt32 := true
 	for _, v := range src {
-		diff := int64(v) - int64(prev)
-		if diff < minInt32 || diff > maxInt32 {
-			fitsInt32 = false
-		}
-		if diff < 0 {
+		if int64(v)-int64(prev) < 0 {
 			needZigZag = true
 		}
 		prev = v
 	}
 	prev = 0
 	if needZigZag {
-		if !fitsInt32 {
-			panic("fastpfor: delta difference exceeds 32-bit signed integer range, cannot apply zigzag encoding")
-		}
 		for i, v := range src {
 			diff := int32(int64(v) - int64(prev))
 			dst[i] = zigzagEncode32(diff)

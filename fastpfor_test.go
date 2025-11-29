@@ -144,6 +144,12 @@ func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 	assert.Equal(src, got, "zigzag delta with exceptions round-trip mismatch")
 }
 
+func TestPackDeltaHandlesMixedLargeDiffs(t *testing.T) {
+	values := []uint32{0x30303030, 0x00303030, 0x81303030}
+	buf := assertDeltaRoundTrip(t, values)
+	assertValidEncoding(t, buf)
+}
+
 func TestPackBitWidthCoverage(t *testing.T) {
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
 	dst := make([]uint32, blockSize)
