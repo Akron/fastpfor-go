@@ -1,50 +1,68 @@
-# bp128
+# FastPFOR in Go
 
-Package bp128 implements [SIMD-BP128][1] integer encoding and decoding.
-It requires an x86_64/AMD64 CPU that supports SSE2 instructions.
+Package fastpfor implements integer encoding and decoding using
+[PFOR][1] and relying on the FastPFOR implementation,
+making use of the SIMD kernels provided by [robskie/bp128](github.com/robskie/bp128).
 
-For the original C++ version and other fast encoding and decoding schemes see
-[this][2].
+This is work in progress and especially the layout may change
+significantly in the future.
 
-[1]: http://arxiv.org/abs/1209.2137
-[2]: https://github.com/lemire/SIMDCompressionAndIntersection
 
 ## Installation
 ```sh
-go get github.com/robskie/bp128
+go get github.com/akron/fastpfor-go
 ```
 
-## API Reference
+## Serialization format
 
-Godoc documentation can be found [here](https://godoc.org/github.com/robskie/bp128).
+The serialized binary format is:
+├── Header               // 4 Bytes
+│   ├── count            // 8 Bits
+│   ├── bitWidth         // 6 Bits
+│   ├── exceptionFlag    // 1 Bit
+│   ├── zigZagFlag       // 1 Bit
+├── Payload
+│   ├── Lane 0           // ceil(32 * bitWidth / 32) Bytes
+│   ├── Lane 1
+│   ├── Lane 2
+│   ├── Lane 3
+├── Patch
+│   ├── exceptionCount   // 1 Byte
+│   ├── Positions        // (exceptionCount * 1) Bytes
+│   │   ├── pos1         // 1 Byte
+│   │   ├── ... 
+│   ├── Exceptions       // (exceptionCount * 4) Bytes
+│   │   ├── exc1         // 4 Bytes
+│   │   ├── ... 
 
-## Benchmarks
-
-I used a Core i5 2415M (2.3GHz) with 8GB DDR3-1333 RAM for these benchmarks.
-For the test data, I generated 2^20 32-bit clustered integers in the range
-[0, 2^29) by following [these instructions][3]. These clustered integers are
-then grouped into 256KiB chunks before being fed into an encoder/decoder. The
-resulting encoding/decoding speed is measured in millions of integers per second
-(mis).
-
-You can run these benchmarks by running these commands in terminal.
-
-```bash
-cd $GOPATH/src/github.com/robskie/bp128/benchmark
-go run benchmark.go
+A block always holds up to 128 uint32 integers.
+The bitpacked integers in the payload are rearranged before packing,
+so they can make use of SSE2 SIMD instructions.
+They are split into 4 lanes, each encoding every 4th element,
+meaning for 128 values (starting with index 0):
+```
+- Lane 0: v0, v4, v8, v12 ... v124
+- Lane 1: v1, v5, v9  v13 ... v125
+- Lane 2: v2, v6, v10 v14 ... v126
+- Lane 3: v3, v7, v11 v15 ... v127
 ```
 
-[3]: https://github.com/lemire/SIMDCompressionAndIntersection/tree/master/advancedbenchmarking
+The positions in the exception block are not lane-splitted but absolute.
+Only the bits not packed in the lanes are stored in the exceptions,
+so they are later re-applied with ` dst[pos] |= exc << bitWidth`.
 
-Here are the results.
+## Fuzzing
+- go test -fuzz=FuzzPackRoundTrip -fuzztime=1m ./...
+- go test -fuzz=FuzzPackDeltaRoundTrip -fuzztime=1m ./...
+- go test -fuzz=FuzzPackRoundTrip -fuzztime=1m -tags purego ./...
+- go test -fuzz=FuzzPackDeltaRoundTrip -fuzztime=1m -tags purego ./...
+- go test -race ./...
 
-```
-BenchmarkPack32               894 mis
-BenchmarkUnPack32            2279 mis
-BenchmarkDeltaPack32         1163 mis
-BenchmarkDeltaUnPack32       3443 mis
-BenchmarkPack64               511 mis
-BenchmarkUnPack64            1596 mis
-BenchmarkDeltaPack64          577 mis
-BenchmarkDeltaUnPack64       2265 mis
-```
+## Benchmarking
+- go test -bench=. -benchmem -benchtime=10x
+- go test -bench=. -benchmem -benchtime=10x -tags=purego
+
+## Copyright
+
+Copyright (c) 2015-2016 robskie <mrobskie@gmail.com>
+Copyright (c) 2025 Nils Diewald
