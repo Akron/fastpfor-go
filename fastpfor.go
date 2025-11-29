@@ -116,9 +116,8 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	// Calculate the total length of the block
 	total := headerBytes + payloadLen + patchBytes(len(exceptions))
 
-	var start int
-	// TODO: Maybe not necessary
-	dst, start = appendSpace(dst, total)
+	start := len(dst)
+	dst = append(dst, make([]byte, total)...)
 	flags := extraFlags
 	if len(exceptions) > 0 {
 		flags |= headerExceptionFlag
@@ -229,22 +228,6 @@ func validateBlockLength(n int) {
 	if n > blockSize {
 		panic(fmt.Sprintf("fastpfor: block length %d exceeds maximum %d", n, blockSize))
 	}
-}
-
-// appendSpace grows dst by extra bytes and returns the resized slice plus the
-// index of the first newly allocated byte. The function avoids allocating when
-// the existing capacity is sufficient.
-func appendSpace(dst []byte, extra int) ([]byte, int) {
-	start := len(dst)
-	need := start + extra
-	if cap(dst) < need {
-		newDst := make([]byte, need)
-		copy(newDst, dst)
-		dst = newDst
-	} else {
-		dst = dst[:need]
-	}
-	return dst, start
 }
 
 // ensureUint32Len ensures the destination slice has at least n uint32 elements.
@@ -368,9 +351,7 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 // unpackLanesScalar unpacks the values from the payload into the destination buffer using a scalar implementation.
 func unpackLanesScalar(dst []uint32, payload []byte, count, bitWidth int) {
 	if bitWidth == 0 {
-		for i := range count {
-			dst[i] = 0
-		}
+		clear(dst[:count])
 		return
 	}
 	bytesPerLane := len(payload) / laneCount
