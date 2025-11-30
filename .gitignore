@@ -1,3 +1,11 @@
 todo.md
 testdata/sandbox
 benchmarks
+coverage.out
+*.tar.gz
+*~
+*.log
+.*
+\#*\#
+!/.gitignore
+!/.dockerignore
