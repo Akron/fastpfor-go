@@ -1,15 +1,22 @@
 # FastPFOR in Go
 
 Package fastpfor implements integer encoding and decoding using
-[PFOR][1] and relying on the FastPFOR implementation,
-making use of the SIMD kernels provided by [robskie/bp128](github.com/robskie/bp128).
+[PFOR][1] and relying on the [FastPFOR][2] implementation,
+making use of SIMD kernels provided by [robskie/bp128](github.com/robskie/bp128).
 
 This is work in progress and especially the layout may change
 significantly in the future.
 
+[1] Zukowski, M., Heman, S., Nes, N., & Boncz, P. (2006). Super-Scalar RAM-CPU Cache Compression.
+    22nd International Conference on Data Engineering (ICDE’06), 59–59.
+    https://doi.org/10.1109/ICDE.2006.150
+[2] Lemire, D., & Boytsov, L. (2015). Decoding billions of integers per second through vectorization.
+    Software: Practice and Experience, 45(1), 1–29. https://doi.org/10.1002/spe.2203
+
 
 ## Installation
 ```sh
+go generate ./internal/avo
 go get github.com/akron/fastpfor-go
 ```
 

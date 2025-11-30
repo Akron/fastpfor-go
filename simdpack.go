@@ -18,6 +18,8 @@ func initSIMDSelection() {
 		packLanes = packLanesSIMDPreferred
 		unpackLanes = unpackLanesSIMDPreferred
 		requiredBitWidth = requiredBitWidthSIMD
+		deltaEncode = deltaEncodeSIMD
+		deltaDecode = deltaDecodeSIMD
 		simdAvailable = true
 		return
 	}
@@ -463,4 +465,40 @@ func requiredBitWidthSIMD(values []uint32) int {
 	}
 	width := maxBits128_32(uintptr(unsafe.Pointer(&buf[0])), 0, &zeroSeed)
 	return int(width)
+}
+
+//go:noescape
+func deltaEncodeSIMDAsm(dst *uint32, src *uint32, n int) uint32
+
+//go:noescape
+func deltaDecodeSIMDAsm(dst *uint32, src *uint32, n int)
+
+//go:noescape
+func zigzagEncodeSIMDAsm(buf *uint32, n int)
+
+//go:noescape
+func zigzagDecodeSIMDAsm(buf *uint32, n int)
+
+// deltaEncodeSIMD encodes the deltas of src into dst using SIMD instructions.
+func deltaEncodeSIMD(dst, src []uint32) bool {
+	if len(src) == 0 {
+		return false
+	}
+	need := deltaEncodeSIMDAsm(&dst[0], &src[0], len(src))
+	if need != 0 {
+		zigzagEncodeSIMDAsm(&dst[0], len(src))
+		return true
+	}
+	return false
+}
+
+// deltaDecodeSIMD decodes the deltas of src into dst using SIMD instructions.
+func deltaDecodeSIMD(dst, deltas []uint32, useZigZag bool) {
+	if len(deltas) == 0 {
+		return
+	}
+	if useZigZag {
+		zigzagDecodeSIMDAsm(&deltas[0], len(deltas))
+	}
+	deltaDecodeSIMDAsm(&dst[0], &deltas[0], len(deltas))
 }

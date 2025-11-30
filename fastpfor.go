@@ -66,6 +66,9 @@ var unpackLanes func(dst []uint32, payload []byte, count, bitWidth int) = unpack
 // value in the slice without exceptions.
 var requiredBitWidth func(values []uint32) int = requiredBitWidthScalar
 
+var deltaEncode func(dst, src []uint32) bool = deltaEncodeScalar
+var deltaDecode func(dst, deltas []uint32, useZigZag bool) = deltaDecodeScalar
+
 var (
 	simdAvailable bool
 	bo            = binary.LittleEndian
@@ -539,14 +542,15 @@ func applyExceptions(dst []uint32, positions []byte, values []byte, bitWidth int
 	}
 }
 
-// deltaEncode writes first-order deltas from src into dst (len(dst) == len(src)).
-func deltaEncode(dst, src []uint32) bool {
+// deltaEncodeScalar writes first-order deltas from src into dst (len(dst) == len(src)).
+func deltaEncodeScalar(dst, src []uint32) bool {
 	var prev uint32
 	needZigZag := false
 	for _, v := range src {
 		if int64(v)-int64(prev) < 0 {
 			needZigZag = true
 		}
+
 		prev = v
 	}
 	prev = 0
@@ -565,8 +569,8 @@ func deltaEncode(dst, src []uint32) bool {
 	return false
 }
 
-// deltaDecode reconstructs the prefix sums encoded by deltaEncode.
-func deltaDecode(dst, deltas []uint32, useZigZag bool) {
+// deltaDecodeScalar reconstructs the prefix sums encoded by deltaEncode.
+func deltaDecodeScalar(dst, deltas []uint32, useZigZag bool) {
 	if useZigZag {
 		var prev int64
 		for i, d := range deltas {
