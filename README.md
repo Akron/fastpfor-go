@@ -23,6 +23,9 @@ go get github.com/akron/fastpfor-go
 ## Serialization format
 
 The serialized binary format is:
+
+```
+Integer Block
 ├── Header               // 4 Bytes
 │   ├── count            // 8 Bits
 │   ├── bitWidth         // 6 Bits
@@ -41,6 +44,7 @@ The serialized binary format is:
 │   ├── Exceptions       // (exceptionCount * 4) Bytes
 │   │   ├── exc1         // 4 Bytes
 │   │   ├── ... 
+```
 
 A block always holds up to 128 uint32 integers.
 The bitpacked integers in the payload are rearranged before packing,
