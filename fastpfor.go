@@ -65,10 +65,6 @@ var packLanes func(dst []byte, values []uint32, bitWidth int) = packLanesScalar
 // count (tail values outside count retain their previous contents).
 var unpackLanes func(dst []uint32, payload []byte, count, bitWidth int) = unpackLanesScalar
 
-// requiredBitWidth returns the minimum number of bits needed to encode every
-// value in the slice without exceptions.
-var requiredBitWidth func(values []uint32) int = requiredBitWidthScalar
-
 var deltaEncode func(dst, src []uint32) bool = deltaEncodeScalar
 var deltaDecode func(dst, deltas []uint32, useZigZag bool) = deltaDecodeScalar
 

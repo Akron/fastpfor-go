@@ -17,7 +17,6 @@ func initSIMDSelection() {
 	if cpu.X86.HasSSE2 {
 		packLanes = packLanesSIMDPreferred
 		unpackLanes = unpackLanesSIMDPreferred
-		requiredBitWidth = requiredBitWidthSIMD
 		deltaEncode = deltaEncodeSIMD
 		deltaDecode = deltaDecodeSIMD
 		simdAvailable = true
@@ -448,25 +447,6 @@ func alignedByteSlice(storage *[maxPayloadBytes + 16]byte) []byte {
 func align16(ptr uintptr) uintptr {
 	const mask = 16 - 1 // mask to round up to the next 16-byte boundary
 	return (ptr + mask) &^ mask
-}
-
-//go:noescape
-func maxBits128_32(in uintptr, offset int, seed *byte) uint8
-
-// requiredBitWidthSIMD returns the minimum number of bits in the block using
-// the SIMD-oriented maxBits128 kernel.
-func requiredBitWidthSIMD(values []uint32) int {
-	if len(values) == 0 {
-		return 0
-	}
-	var storage [blockSize + 4]uint32
-	buf := alignedUint32Slice(&storage)
-	n := copy(buf, values)
-	for i := n; i < blockSize; i++ {
-		buf[i] = 0
-	}
-	width := maxBits128_32(uintptr(unsafe.Pointer(&buf[0])), 0, &zeroSeed)
-	return int(width)
 }
 
 //go:noescape
