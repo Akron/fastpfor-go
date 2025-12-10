@@ -25,34 +25,37 @@ const (
 	// laneLength is the number of integers stored per lane.
 	laneLength = blockSize / laneCount
 
-	// headerBytes is the number of bytes reserved for the block header. The
-	// serialized 32-bit (word-aligned) header stores
-	//   (a) the logical element count (0–127) in 8 bits,
-	//   (b) the per-lane bit width used for packing (0–32) in 6 bits,
-	//   (c) flag bits that describe optional sections (exceptions, zigzag markers, etc).
-	headerBytes = 4
-
-	// headerCountBits reserves 8 bits in the header for the logical value count (<= 128).
-	headerCountBits = 8
-	// headerWidthBits reserves 6 bits for the packed bit width (enough to cover 0–32).
-	headerWidthBits = 6
-
-	// headerCountMask isolates the element-count field inside the header word.
-	headerCountMask = (1 << headerCountBits) - 1
-	// headerWidthMask isolates the bit-width field inside the header word.
-	headerWidthMask = (1 << headerWidthBits) - 1
-	// headerWidthShift offsets the width bits immediately after the count bits.
+	// -----------------------------------------------------------------------------
+	// Header layout constants
+	// -----------------------------------------------------------------------------
+	//
+	// The 32-bit header is structured as follows (little-endian):
+	//
+	//	Bits  0-7:  element count (0–128)
+	//	Bits  8-13: bit width for packed values (0–32)
+	//	Bit   30:   zigzag flag (1 = deltas are zigzag-encoded)
+	//	Bit   31:   exception flag (1 = patch table follows payload)
+	headerBytes      = 4 // Size of the header in bytes
+	headerCountBits  = 8 // Bits reserved for element count
+	headerWidthBits  = 6 // Bits reserved for bit width
+	headerCountMask  = (1 << headerCountBits) - 1
+	headerWidthMask  = (1 << headerWidthBits) - 1
 	headerWidthShift = headerCountBits
 
-	// headerExceptionFlag marks that the block contains a trailing exception table.
+	// Flag bits in the upper portion of the header
+	headerZigZagFlag    = uint32(1 << 30)
 	headerExceptionFlag = uint32(1 << 31)
-
-	// headerZigZagFlag marks that the block stores zigzag-encoded deltas.
-	headerZigZagFlag = uint32(1 << 30)
 
 	// mathMaxUint32 is the maximum uint32, used while constructing bit masks without conversions.
 	mathMaxUint32 = ^uint32(0)
 )
+
+// payloadBytesLUT is a precomputed lookup table for payload sizes at each bit width (0-32).
+// Each entry is: ((laneLength * bitWidth + 31) / 32 * 4) * laneCount
+var payloadBytesLUT = [33]int{
+	0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256,
+	272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512,
+}
 
 // packLanes splits the block into four SIMD-friendly lanes and bit-packs each
 // lane independently. Missing tail values (len < 128) are treated as zeros.
@@ -245,29 +248,20 @@ func ensureUint32Len(dst []uint32, n int) []uint32 {
 }
 
 // requiredBitWidthScalar returns the minimum number of bits needed to encode every
-// value in the slice without exceptions.
+// value in the slice without exceptions. Uses OR-reduction to avoid per-element branching.
 func requiredBitWidthScalar(values []uint32) int {
-	var width int
+	var orAll uint32
 	for _, v := range values {
-		if v == 0 {
-			continue
-		}
-		if w := bits.Len32(v); w > width {
-			width = w
-		}
+		orAll |= v
 	}
-	return width
+	return bits.Len32(orAll)
 }
 
 // payloadBytes returns the lane-aligned number of bytes produced by packing a
 // 128-value block at the provided bit width. Each lane stores 32 integers, so
 // the result is always a multiple of 16 bytes.
 func payloadBytes(bitWidth int) int {
-	if bitWidth == 0 {
-		return 0
-	}
-	bytesPerLane := ((laneLength * bitWidth) + 31) / 32 * 4
-	return bytesPerLane * laneCount
+	return payloadBytesLUT[bitWidth]
 }
 
 // patchBytes returns the number of bytes needed to serialize the exception
@@ -448,17 +442,20 @@ func selectBitWidth(values []uint32) (width int, exceptions []exception) {
 
 	const uint32Bits = 32
 
-	maxWidth := requiredBitWidth(values)
-	bestWidth := maxWidth
-	bestSize := headerBytes + payloadBytes(maxWidth)
-	bestExcCount := 0
-
-	// Initialize the histogram of bit lengths
+	// Single pass: build histogram and find max width via OR-reduction
 	var freqs [uint32Bits + 1]int
+	var orAll uint32
 	for _, v := range values {
 		freqs[bits.Len32(v)]++
+		orAll |= v
 	}
+	maxWidth := bits.Len32(orAll)
 
+	bestWidth := maxWidth
+	bestSize := headerBytes + payloadBytesLUT[maxWidth]
+	bestExcCount := 0
+
+	// Build cumulative "greater than" counts from the histogram
 	var greater [uint32Bits + 1]int
 	var running int
 	for bit := uint32Bits; bit >= 0; bit-- {
@@ -469,12 +466,10 @@ func selectBitWidth(values []uint32) (width int, exceptions []exception) {
 	// Check for the optimal bitwidth candidate
 	for candidate := range maxWidth {
 		excCount := greater[candidate]
-
-		// If there are no exceptions for this bit width, skip it
 		if excCount == 0 {
 			continue
 		}
-		size := headerBytes + payloadBytes(candidate) + patchBytes(excCount)
+		size := headerBytes + payloadBytesLUT[candidate] + patchBytes(excCount)
 		if size < bestSize || (size == bestSize && candidate < bestWidth) {
 			bestSize = size
 			bestWidth = candidate
@@ -548,30 +543,27 @@ func applyExceptions(dst []uint32, positions []byte, values []byte, bitWidth int
 }
 
 // deltaEncodeScalar writes first-order deltas from src into dst (len(dst) == len(src)).
+// Single-pass: encodes raw deltas and detects negative deltas simultaneously.
+// If any negative delta is found, re-encodes the entire buffer with zigzag.
 func deltaEncodeScalar(dst, src []uint32) bool {
 	var prev uint32
 	needZigZag := false
-	for _, v := range src {
-		if int64(v)-int64(prev) < 0 {
-			needZigZag = true
-		}
-
-		prev = v
-	}
-	prev = 0
-	if needZigZag {
-		for i, v := range src {
-			diff := int32(int64(v) - int64(prev))
-			dst[i] = zigzagEncode32(diff)
-			prev = v
-		}
-		return true
-	}
 	for i, v := range src {
 		dst[i] = v - prev
+		needZigZag = needZigZag || v < prev
 		prev = v
 	}
-	return false
+	if !needZigZag {
+		return false
+	}
+	// Re-encode with zigzag (deltas already computed, just need transform)
+	prev = 0
+	for i, v := range src {
+		diff := int32(int64(v) - int64(prev))
+		dst[i] = zigzagEncode32(diff)
+		prev = v
+	}
+	return true
 }
 
 // deltaDecodeScalar reconstructs the prefix sums encoded by deltaEncode.

@@ -229,6 +229,8 @@ func packLanesSIMDPreferred(dst []byte, values []uint32, bitWidth int) {
 
 // simdPack encodes up to 128 uint32 values (zero-filled) into dst using SIMD bit packing.
 // dst must have space for bitWidth*16 bytes (same as scalar payload).
+// Note: We use a switch instead of a dispatch table to allow the compiler to prove
+// that the stack-allocated buffers don't escape (function pointers break escape analysis).
 func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 	if bitWidth <= 0 || bitWidth > 32 || len(values) > blockSize {
 		return false
@@ -240,12 +242,13 @@ func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 
 	var valueStorage [blockSize + 4]uint32
 	valuesBuf := alignedUint32Slice(&valueStorage)
+	// Precompute mask; avoid shift overflow when bitWidth == 32
 	var mask uint32 = 0xFFFFFFFF
 	if bitWidth < 32 {
 		mask = (1 << bitWidth) - 1
 	}
-	for i := range values {
-		valuesBuf[i] = values[i] & mask
+	for i, v := range values {
+		valuesBuf[i] = v & mask
 	}
 	var payloadStorage [maxPayloadBytes + 16]byte
 	payloadBuf := alignedByteSlice(&payloadStorage)
@@ -333,15 +336,14 @@ func unpackLanesSIMDPreferred(dst []uint32, payload []byte, count, bitWidth int)
 }
 
 // simdUnpack decodes a SIMD-packed payload into dst (count <= 128).
+// Note: We use a switch instead of a dispatch table to allow the compiler to prove
+// that the stack-allocated buffers don't escape (function pointers break escape analysis).
 func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 	if bitWidth <= 0 || bitWidth > 32 || count < 0 || count > blockSize {
 		return false
 	}
 	needed := bitWidth * 16
-	if len(payload) < needed {
-		return false
-	}
-	if len(dst) < count {
+	if len(payload) < needed || len(dst) < count {
 		return false
 	}
 

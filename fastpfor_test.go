@@ -715,6 +715,28 @@ func BenchmarkUnpackDelta(b *testing.B) {
 	resultU32 = dst
 }
 
+func BenchmarkPackDeltaMixed(b *testing.B) {
+	data := genMixed(blockSize)
+	scratch := make([]uint32, blockSize)
+	dst := make([]byte, 0, headerBytes+payloadBytes(16))
+	b.ReportAllocs()
+	for range b.N {
+		dst = PackDelta(dst[:0], data, scratch)
+	}
+	resultBytes = dst
+}
+
+func BenchmarkUnpackDeltaMixed(b *testing.B) {
+	packScratch := make([]uint32, blockSize)
+	buf := PackDelta(nil, genMixed(blockSize), packScratch)
+	dst := make([]uint32, 0, blockSize)
+	b.ReportAllocs()
+	for range b.N {
+		dst = UnpackDelta(dst[:0], buf)
+	}
+	resultU32 = dst
+}
+
 // ----------------------------------------------------------------------------
 // Helper functions for generating test data
 // ----------------------------------------------------------------------------
