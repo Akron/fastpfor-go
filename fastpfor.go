@@ -84,6 +84,11 @@ func IsSIMDavailable() bool {
 	return simdAvailable
 }
 
+// MaxBlockSize returns the maximum number of bytes needed to store a block of values.
+func MaxBlockSize() int {
+	return headerBytes + (blockSize * 4)
+}
+
 // exception tracks a single patched integer: its index in the block and the
 // high bits that must be re-applied (OR-ed) after unpacking the truncated value.
 type exception struct {

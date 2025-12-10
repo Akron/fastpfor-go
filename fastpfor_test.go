@@ -13,6 +13,12 @@ import (
 // Non-delta round-trip tests
 // -----------------------------------------------------------------------------
 
+// TestMaxBlockSize verifies the exported MaxBlockSize constant matches internal logic.
+func TestMaxBlockSize(t *testing.T) {
+	// MaxBlockSize = headerBytes (4) + blockSize (128) * 4 bytes/int = 516
+	assert.Equal(t, 516, MaxBlockSize())
+}
+
 // TestPackLengthValidation ensures Pack rejects inputs that exceed blockSize.
 func TestPackLengthValidation(t *testing.T) {
 	assert := assert.New(t)
