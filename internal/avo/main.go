@@ -22,7 +22,7 @@ func main() {
 
 	Package("github.com/Akron/fastpfor-go")
 	ConstraintExpr("amd64")
-	ConstraintExpr("!purego")
+	ConstraintExpr("!noasm")
 
 	if comp == "delta" || comp == "all" {
 		genDeltaEncodeKernel()

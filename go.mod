@@ -3,6 +3,7 @@ module github.com/Akron/fastpfor-go
 go 1.22.2
 
 require (
+	github.com/mhr3/streamvbyte v0.3.1
 	github.com/mmcloughlin/avo v0.6.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.20.0

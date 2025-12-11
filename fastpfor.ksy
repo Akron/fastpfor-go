@@ -2,6 +2,10 @@ meta:
   id: pfor
   title: Integer Compression
   endian: le
+
+imports:
+  - streamvbyte
+
 doc: |
   This is a compression format for arrays of integers. 
   This definition corresponds to the implementation at https://github.com/akron/fastpfor-go.
