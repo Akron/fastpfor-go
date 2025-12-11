@@ -35,6 +35,7 @@ const (
 	//
 	//	Bits  0-7:  element count (0–128)
 	//	Bits  8-13: bit width for packed values (0–32)
+	//	Bit   29:   delta flag (1 = values are delta-encoded)
 	//	Bit   30:   zigzag flag (1 = deltas are zigzag-encoded)
 	//	Bit   31:   exception flag (1 = patch table follows payload)
 	headerBytes      = 4 // Size of the header in bytes
@@ -45,6 +46,7 @@ const (
 	headerWidthShift = headerCountBits
 
 	// Flag bits in the upper portion of the header
+	headerDeltaFlag     = uint32(1 << 29)
 	headerZigZagFlag    = uint32(1 << 30)
 	headerExceptionFlag = uint32(1 << 31)
 
@@ -151,11 +153,12 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 
 // UnpackUint32 decodes a PackUint32-produced buffer back into uint32 values, writing into
 // the supplied dst slice (which will be resized as needed).
+// If the data was delta-encoded (via PackDeltaUint32), it is automatically delta-decoded.
 func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
 		panic(fmt.Sprintf("fastpfor: UnpackUint32 buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
-	count, bitWidth, hasExceptions, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
+	count, bitWidth, hasExceptions, hasDelta, hasZigZag := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	validateBlockLength(count)
 
 	payloadLen := payloadBytes(bitWidth)
@@ -203,40 +206,39 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 		applyExceptions(dst[:count], positions, patch[:svbLen], excCount, bitWidth)
 	}
 
+	// Apply delta decoding if the data was delta-encoded
+	if hasDelta && count > 0 {
+		deltaDecode(dst, dst, hasZigZag)
+	}
+
 	return dst
 }
 
 // PackDeltaUint32 delta-encodes values in-place prior to calling PackUint32.
 // WARNING: This function mutates the values slice. If you need to preserve
 // the original values, make a copy before calling PackDeltaUint32.
+// The delta flag is set in the header so UnpackUint32 can auto-detect and decode.
 func PackDeltaUint32(dst []byte, values []uint32) []byte {
 	validateBlockLength(len(values))
 	var useZigZag bool
 	if len(values) > 0 {
 		useZigZag = deltaEncode(values, values) // in-place
 	}
-	var flags uint32
+	flags := headerDeltaFlag // Always set delta flag
 	if useZigZag {
 		flags |= headerZigZagFlag
 	}
 	return packInternal(dst, values, flags)
 }
 
-// UnpackDeltaUint32 reverses PackDeltaUint32 by unpacking the delta stream and then
-// performing a prefix sum (optionally zigzag-decoded) in place.
+// UnpackDeltaUint32 reverses PackDeltaUint32.
+// Deprecated: Use UnpackUint32 instead, which auto-detects delta encoding from the header.
+// This function is kept for backward compatibility.
+/*s
 func UnpackDeltaUint32(dst []uint32, buf []byte) []uint32 {
-	if len(buf) < headerBytes {
-		panic(fmt.Sprintf("fastpfor: UnpackDeltaUint32 buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
-	}
-	header := bo.Uint32(buf[:headerBytes])
-	_, _, _, useZigZag := decodeHeader(header)
-	dst = UnpackUint32(dst[:0], buf)
-	if len(dst) == 0 {
-		return dst
-	}
-	deltaDecode(dst, dst, useZigZag)
-	return dst
+	return UnpackUint32(dst, buf)
 }
+*/
 
 // validateBlockLength panics if the caller tries to encode more than BlockSize
 // integers. FastPFOR always operates on fixed 128-value chunks.
@@ -303,10 +305,11 @@ func encodeHeader(count, bitWidth int, flags uint32) uint32 {
 }
 
 // decodeHeader decodes the header for a block. It extracts the count, bit width, and flags.
-func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, hasZigZag bool) {
+func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, hasDelta bool, hasZigZag bool) {
 	count = int(header & headerCountMask)
 	bitWidth = int((header >> headerWidthShift) & headerWidthMask)
 	hasExceptions = header&headerExceptionFlag != 0
+	hasDelta = header&headerDeltaFlag != 0
 	hasZigZag = header&headerZigZagFlag != 0
 	return
 }

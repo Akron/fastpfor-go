@@ -33,9 +33,12 @@ types:
       bit_width:
         value: (raw >> 8) & 0x3F
         doc: Bit width used for packing the payload lanes.
+      flag_delta:
+        value: (raw & (1 << 29)) != 0
+        doc: Indicates if delta encoding was used.
       flag_zigzag:
         value: (raw & (1 << 30)) != 0
-        doc: Indicates if zigzag encoding was used.
+        doc: Indicates if zigzag encoding was used (only meaningful when flag_delta is set).
       flag_exception:
         value: (raw & (1 << 31)) != 0
         doc: Indicates if an exception section follows the payload.

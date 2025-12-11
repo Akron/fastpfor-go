@@ -55,12 +55,14 @@ timestamps := []uint32{1000, 1005, 1012, 1018, 1025, 1033, 1040, 1048}
 // Compress with delta encoding (mutates timestamps in-place)
 encoded := fastpfor.PackDeltaUint32(nil, timestamps)
 
-// Decompress
-decoded := fastpfor.UnpackDeltaUint32(nil, encoded)
+// Decompress - UnpackUint32 auto-detects delta encoding from the header
+decoded := fastpfor.UnpackUint32(nil, encoded)
 ```
 
 **Note:** `PackDeltaUint32` performs delta encoding in-place, mutating the input slice.
 If you need to preserve the original values, make a copy first.
+
+`UnpackUint32` automatically detects and decodes delta-encoded data based on the header flags.
 
 Reuse buffers to avoid allocations in hot paths:
 
@@ -88,8 +90,9 @@ Integer Block
 ├── Header               // 4 Bytes
 │   ├── count            // 8 Bits
 │   ├── bitWidth         // 6 Bits
+│   ├── deltaFlag        // 1 Bit (indicates delta encoding)
+│   ├── zigZagFlag       // 1 Bit (indicates zigzag encoding, used with delta)
 │   ├── exceptionFlag    // 1 Bit
-│   ├── zigZagFlag       // 1 Bit
 ├── Payload              // bitWidth * 16 Bytes (interleaved lanes)
 │   ├── Block 0          // 16 Bytes (4 words, one per lane)
 │   │   ├── Lane 0 Word 0
