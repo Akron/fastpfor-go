@@ -44,15 +44,28 @@ types:
         doc: Total size of the payload in bytes (4 lanes * 4 bytes/int * bit_width/32 = 16 * bit_width).
 
   payload:
+    doc: |
+      The payload contains bitpacked lane data in an interleaved format.
+      Lanes are interleaved in 16-byte blocks (4 words, one per lane).
+      Total size is bit_width * 16 bytes (bit_width blocks of 16 bytes each).
     params:
       - id: bit_width
         type: u1
     seq:
-      - id: lanes
-        size: bit_width * 4
+      - id: blocks
+        type: lane_block
+        repeat: expr
+        repeat-expr: bit_width
+        doc: Interleaved 16-byte blocks (one word from each of 4 lanes).
+
+  lane_block:
+    doc: A 16-byte block containing one word from each of the 4 lanes.
+    seq:
+      - id: lane_words
+        type: u4
         repeat: expr
         repeat-expr: 4
-        doc: 4 SIMD-friendly lanes.
+        doc: Words from lane 0, 1, 2, 3 respectively.
 
   exceptions:
     seq:

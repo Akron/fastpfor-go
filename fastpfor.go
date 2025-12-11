@@ -312,23 +312,26 @@ func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, h
 }
 
 // packLanesScalar packs the values into the destination buffer using a scalar implementation.
+// The format matches bp128 SIMD: lanes are interleaved in 16-byte blocks (4 words per block).
+// For bitWidth b, each lane produces b words (since 32 values × b bits = 32b bits = b words).
+// These are interleaved: [lane0_word0, lane1_word0, lane2_word0, lane3_word0, lane0_word1, ...]
 func packLanesScalar(dst []byte, values []uint32, bitWidth int) {
 	if bitWidth == 0 {
 		return
 	}
-	bytesPerLane := len(dst) / laneCount
 	// Reference (FastPFor.cpp):
 	//
 	//	for(uint32_t k = 0; k < 4; ++k)
 	//	  fastpackwithoutmask(in+4*i+k, out + k*bits, bits);
 	for lane := range laneCount {
-		packLaneScalar(dst[lane*bytesPerLane:(lane+1)*bytesPerLane], values, lane, bitWidth)
+		packLaneInterleaved(dst, values, lane, bitWidth)
 	}
 }
 
-// packLaneScalar packs 32 integers taken from the specified lane (lane, lane+4, …)
-// into the destination buffer using a streaming 64-bit accumulator.
-func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
+// packLaneInterleaved packs 32 integers from the specified lane (indices lane, lane+4, …)
+// directly into the interleaved output format using a streaming 64-bit accumulator.
+// Output words are written at byte offsets: lane*4, lane*4+16, lane*4+32, ... (stride 16 bytes).
+func packLaneInterleaved(dst []byte, values []uint32, lane, bitWidth int) {
 	// Precompute mask outside the loop to avoid repeated conditional checks
 	var mask uint64
 	if bitWidth >= 32 {
@@ -339,7 +342,7 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 
 	var acc uint64
 	var bitsInAcc int
-	outIdx := 0
+	outByteIdx := lane * 4 // Start at lane's first word position
 
 	// Rough C++ equivalent (FastPFor.cpp::fastpackwithoutmask):
 	//
@@ -349,7 +352,6 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 	//	  if(bitOffset >= 32) { *out++ = uint32_t(buffer); buffer >>= 32; bitOffset -= 32; }
 	//	  bitOffset += bitWidth;
 	//	}
-
 	for i := range laneLength {
 		idx := lane + i*laneCount
 		var v uint32
@@ -359,33 +361,33 @@ func packLaneScalar(output []byte, values []uint32, lane, bitWidth int) {
 		acc |= (uint64(v) & mask) << bitsInAcc
 		bitsInAcc += bitWidth
 		for bitsInAcc >= 32 {
-			bo.PutUint32(output[outIdx:], uint32(acc))
-			outIdx += 4
+			bo.PutUint32(dst[outByteIdx:], uint32(acc))
+			outByteIdx += 16 // Skip to next word position for this lane (4 lanes × 4 bytes)
 			acc >>= 32
 			bitsInAcc -= 32
 		}
 	}
 	if bitsInAcc > 0 {
-		bo.PutUint32(output[outIdx:], uint32(acc))
+		bo.PutUint32(dst[outByteIdx:], uint32(acc))
 	}
 }
 
 // unpackLanesScalar unpacks the values from the payload into the destination buffer using a scalar implementation.
+// The format matches bp128 SIMD: lanes are interleaved in 16-byte blocks (4 words per block).
 func unpackLanesScalar(dst []uint32, payload []byte, count, bitWidth int) {
 	if bitWidth == 0 {
 		clear(dst[:count])
 		return
 	}
-	bytesPerLane := len(payload) / laneCount
 	for lane := range laneCount {
-		unpackLaneScalar(dst, payload[lane*bytesPerLane:(lane+1)*bytesPerLane], lane, bitWidth, count)
+		unpackLaneInterleaved(dst, payload, lane, bitWidth, count)
 	}
 }
 
-// unpackLaneScalar reconstructs the original integers for a single lane and writes
-// them back into dst at the interleaved lane offsets. Mirrors packLane but in
-// reverse order (a literal translation of FastPFor.cpp::fastunpack)
-func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
+// unpackLaneInterleaved reconstructs the original integers for a single lane by reading
+// directly from the interleaved payload format and writing to the lane's output positions.
+// Input words are read from byte offsets: lane*4, lane*4+16, lane*4+32, ... (stride 16 bytes).
+func unpackLaneInterleaved(dst []uint32, payload []byte, lane, bitWidth, count int) {
 	// Precompute mask outside the loop to avoid repeated conditional checks
 	var mask uint32
 	if bitWidth >= 32 {
@@ -403,16 +405,16 @@ func unpackLaneScalar(dst []uint32, input []byte, lane, bitWidth, count int) {
 
 	var acc uint64
 	var bitsInAcc int
-	inIdx := 0
+	inByteIdx := lane * 4 // Start at lane's first word position
+
 	for i := range laneLength {
 		for bitsInAcc < bitWidth {
-			if inIdx >= len(input) {
-				acc |= uint64(0) << bitsInAcc
+			if inByteIdx+4 > len(payload) {
 				bitsInAcc = bitWidth // force exit
 				break
 			}
-			acc |= uint64(bo.Uint32(input[inIdx:])) << bitsInAcc
-			inIdx += 4
+			acc |= uint64(bo.Uint32(payload[inByteIdx:])) << bitsInAcc
+			inByteIdx += 16 // Skip to next word position for this lane (4 lanes × 4 bytes)
 			bitsInAcc += 32
 		}
 		value := uint32(acc) & mask

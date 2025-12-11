@@ -1,6 +1,7 @@
 package fastpfor
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -522,6 +523,99 @@ func TestValidateBlockLengthDirect(t *testing.T) {
 	)
 }
 
+// TestSIMDScalarFormatCompatibility verifies that SIMD and scalar implementations produce
+// identical binary output for the same input. This is critical for wire format compatibility.
+func TestSIMDScalarFormatCompatibility(t *testing.T) {
+	if !IsSIMDavailable() {
+		t.Skip("SIMD not available")
+	}
+
+	for bitWidth := 1; bitWidth <= 32; bitWidth++ {
+		t.Run(fmt.Sprintf("bitWidth_%d", bitWidth), func(t *testing.T) {
+			// Create test input with known values
+			values := make([]uint32, blockSize)
+			mask := uint32(0xFFFFFFFF)
+			if bitWidth < 32 {
+				mask = (1 << bitWidth) - 1
+			}
+			for i := range values {
+				values[i] = uint32(i*7+3) & mask
+			}
+
+			payloadLen := payloadBytes(bitWidth)
+
+			// Pack with SIMD
+			simdPayload := make([]byte, payloadLen)
+			ok := simdPack(simdPayload, values, bitWidth)
+			if !ok {
+				t.Fatalf("simdPack failed for bitWidth %d", bitWidth)
+			}
+
+			// Pack with scalar
+			scalarPayload := make([]byte, payloadLen)
+			packLanesScalar(scalarPayload, values, bitWidth)
+
+			// Compare byte-by-byte
+			if !bytes.Equal(simdPayload, scalarPayload) {
+				t.Errorf("SIMD and scalar produced different output for bitWidth %d", bitWidth)
+				// Show first difference
+				for i := range simdPayload {
+					if simdPayload[i] != scalarPayload[i] {
+						t.Errorf("First difference at byte %d: SIMD=0x%02x, scalar=0x%02x", i, simdPayload[i], scalarPayload[i])
+						break
+					}
+				}
+			}
+
+			// Also verify unpacking compatibility:
+			// Data packed by SIMD should unpack correctly by scalar
+			scalarUnpacked := make([]uint32, blockSize)
+			unpackLanesScalar(scalarUnpacked, simdPayload, blockSize, bitWidth)
+			for i := range values {
+				if scalarUnpacked[i] != values[i] {
+					t.Errorf("Scalar unpack of SIMD data failed at index %d: got %d, want %d", i, scalarUnpacked[i], values[i])
+					break
+				}
+			}
+
+			// Data packed by scalar should unpack correctly by SIMD
+			simdUnpacked := make([]uint32, blockSize)
+			ok = simdUnpack(simdUnpacked, scalarPayload, bitWidth, blockSize)
+			if !ok {
+				t.Fatalf("simdUnpack failed for bitWidth %d", bitWidth)
+			}
+			for i := range values {
+				if simdUnpacked[i] != values[i] {
+					t.Errorf("SIMD unpack of scalar data failed at index %d: got %d, want %d", i, simdUnpacked[i], values[i])
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestSIMDPackDirectly verifies simdPack succeeds
+func TestSIMDPackDirectly(t *testing.T) {
+	if !IsSIMDavailable() {
+		t.Skip("SIMD not available")
+	}
+
+	data := make([]uint32, 128)
+	for i := range data {
+		data[i] = uint32(i)
+	}
+
+	const bitWidth = 7
+	dst := make([]byte, bitWidth*16)
+
+	ok := simdPack(dst, data, bitWidth)
+	t.Logf("simdPack returned: %v", ok)
+
+	if !ok {
+		t.Error("simdPack returned false unexpectedly")
+	}
+}
+
 // TestPackUnpackLanesScalar covers the scalar lane helpers regardless of SIMD availability.
 func TestPackUnpackLanesScalar(t *testing.T) {
 	t.Run("zeroWidthNoop", func(t *testing.T) {
@@ -974,6 +1068,112 @@ func FuzzPackDeltaRoundTrip(f *testing.F) {
 		values := fuzzBytesToValues(data)
 		buf := assertDeltaRoundTrip(t, values)
 		assertValidEncoding(t, buf)
+	})
+}
+
+// FuzzSIMDScalarByteCompatibility verifies that SIMD and scalar implementations
+// produce byte-identical packed output for arbitrary inputs.
+func FuzzSIMDScalarByteCompatibility(f *testing.F) {
+	if !IsSIMDavailable() {
+		f.Skip("SIMD not available")
+	}
+
+	// Seed with various test cases
+	corpus := []struct {
+		bitWidth int
+		values   []uint32
+	}{
+		{1, genSequential(blockSize)},
+		{8, genSequential(blockSize)},
+		{16, genSequential(blockSize)},
+		{32, genSequential(blockSize)},
+		{7, genMixed(blockSize)},
+		{13, genMixed(blockSize)},
+	}
+	for _, seed := range corpus {
+		// Encode as: bitWidth (1 byte) + values (4 bytes each)
+		data := make([]byte, 1+len(seed.values)*4)
+		data[0] = byte(seed.bitWidth)
+		for i, v := range seed.values {
+			binary.LittleEndian.PutUint32(data[1+i*4:], v)
+		}
+		f.Add(data)
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) < 1 {
+			return
+		}
+
+		// Extract bit width (1-32)
+		bitWidth := int(data[0])%32 + 1
+
+		// Extract values (up to blockSize)
+		numValues := (len(data) - 1) / 4
+		if numValues > blockSize {
+			numValues = blockSize
+		}
+		if numValues == 0 {
+			return
+		}
+
+		values := make([]uint32, numValues)
+		mask := uint32(0xFFFFFFFF)
+		if bitWidth < 32 {
+			mask = (1 << bitWidth) - 1
+		}
+		for i := range values {
+			if 1+i*4+4 <= len(data) {
+				values[i] = binary.LittleEndian.Uint32(data[1+i*4:]) & mask
+			}
+		}
+
+		// Pad to blockSize for full block test
+		fullValues := make([]uint32, blockSize)
+		copy(fullValues, values)
+
+		payloadLen := payloadBytes(bitWidth)
+
+		// Pack with SIMD
+		simdPayload := make([]byte, payloadLen)
+		if !simdPack(simdPayload, fullValues, bitWidth) {
+			t.Fatal("simdPack failed")
+		}
+
+		// Pack with scalar
+		scalarPayload := make([]byte, payloadLen)
+		packLanesScalar(scalarPayload, fullValues, bitWidth)
+
+		// Compare byte-by-byte
+		if !bytes.Equal(simdPayload, scalarPayload) {
+			t.Errorf("SIMD and scalar produced different output for bitWidth %d", bitWidth)
+			for i := range simdPayload {
+				if simdPayload[i] != scalarPayload[i] {
+					t.Errorf("First difference at byte %d: SIMD=0x%02x, scalar=0x%02x", i, simdPayload[i], scalarPayload[i])
+					break
+				}
+			}
+		}
+
+		// Verify cross-unpacking works
+		simdUnpacked := make([]uint32, blockSize)
+		scalarUnpacked := make([]uint32, blockSize)
+
+		unpackLanesScalar(scalarUnpacked, simdPayload, blockSize, bitWidth)
+		if !simdUnpack(simdUnpacked, scalarPayload, bitWidth, blockSize) {
+			t.Fatal("simdUnpack failed")
+		}
+
+		for i := range fullValues {
+			if scalarUnpacked[i] != fullValues[i] {
+				t.Errorf("Scalar unpack of SIMD data failed at index %d: got %d, want %d", i, scalarUnpacked[i], fullValues[i])
+				break
+			}
+			if simdUnpacked[i] != fullValues[i] {
+				t.Errorf("SIMD unpack of scalar data failed at index %d: got %d, want %d", i, simdUnpacked[i], fullValues[i])
+				break
+			}
+		}
 	})
 }
 

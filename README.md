@@ -90,11 +90,16 @@ Integer Block
 │   ├── bitWidth         // 6 Bits
 │   ├── exceptionFlag    // 1 Bit
 │   ├── zigZagFlag       // 1 Bit
-├── Payload
-│   ├── Lane 0           // ceil(32 * bitWidth / 32) Bytes
-│   ├── Lane 1
-│   ├── Lane 2
-│   ├── Lane 3
+├── Payload              // bitWidth * 16 Bytes (interleaved lanes)
+│   ├── Block 0          // 16 Bytes (4 words, one per lane)
+│   │   ├── Lane 0 Word 0
+│   │   ├── Lane 1 Word 0
+│   │   ├── Lane 2 Word 0
+│   │   ├── Lane 3 Word 0
+│   ├── Block 1          // 16 Bytes
+│   │   ├── Lane 0 Word 1
+│   │   ├── ...
+│   ├── ... (bitWidth blocks total)
 ├── Patch (if exceptionFlag set)
 │   ├── exceptionCount   // 1 Byte
 │   ├── Positions        // (exceptionCount * 1) Bytes
@@ -107,15 +112,24 @@ Integer Block
 A block always holds up to 128 uint32 integers.
 The bitpacked integers in the payload are rearranged before packing,
 so they can make use of SSE2 SIMD instructions.
-They are split into 4 lanes, each encoding every 4th element,
-meaning for 128 values (starting with index 0):
+Values are split into 4 lanes, each encoding every 4th element:
 
 ```
 - Lane 0: v0, v4, v8, v12 ... v124
-- Lane 1: v1, v5, v9  v13 ... v125
-- Lane 2: v2, v6, v10 v14 ... v126
-- Lane 3: v3, v7, v11 v15 ... v127
+- Lane 1: v1, v5, v9, v13 ... v125
+- Lane 2: v2, v6, v10, v14 ... v126
+- Lane 3: v3, v7, v11, v15 ... v127
 ```
+
+Each lane produces `bitWidth` 32-bit words. The lanes are **interleaved** in the payload
+in 16-byte blocks (one word from each lane per block), matching the bp128 SIMD format:
+
+```
+Byte offset:  0    4    8   12   16   20   24   28  ...
+              L0W0 L1W0 L2W0 L3W0 L0W1 L1W1 L2W1 L3W1 ...
+```
+
+Where `LxWy` = Lane x, Word y.
 
 The positions in the exception block are not lane-splitted but absolute.
 Only the bits not packed in the lanes are stored in the exceptions.
@@ -143,6 +157,7 @@ so using `-tags=noasm` disables SIMD in both libraries simultaneously. This is u
 - `go test -fuzz=FuzzPackDeltaRoundTrip -fuzztime=1m ./...`
 - `go test -fuzz=FuzzPackRoundTrip -fuzztime=1m -tags=noasm ./...`
 - `go test -fuzz=FuzzPackDeltaRoundTrip -fuzztime=1m -tags=noasm ./...`
+- `go test -fuzz=FuzzSIMDScalarByteCompatibility -fuzztime=30s`
 - `go test -race ./...`
 
 ## Benchmarking
