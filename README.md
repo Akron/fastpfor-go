@@ -20,6 +20,63 @@ go generate ./internal/avo
 go get github.com/akron/fastpfor-go
 ```
 
+## Usage
+
+The codec operates on fixed blocks of up to 128 unsigned 32-bit integers:
+
+```go
+package main
+
+import (
+    "fmt"
+    fastpfor "github.com/akron/fastpfor-go"
+)
+
+func main() {
+    // Original data (up to 128 uint32 values per block)
+    values := []uint32{10, 20, 30, 40, 50, 60, 70, 80}
+
+    // Compress
+    encoded := fastpfor.Pack(nil, values)
+    fmt.Printf("Compressed %d integers into %d bytes\n", len(values), len(encoded))
+
+    // Decompress
+    decoded := fastpfor.Unpack(nil, encoded)
+    fmt.Println("Decoded:", decoded)
+}
+```
+
+For sorted or time-series data, use delta encoding for better compression:
+
+```go
+// Monotonically increasing data benefits from delta encoding
+timestamps := []uint32{1000, 1005, 1012, 1018, 1025, 1033, 1040, 1048}
+
+// Compress with delta encoding (requires a scratch buffer)
+scratch := make([]uint32, 128)
+encoded := fastpfor.PackDelta(nil, timestamps, scratch)
+
+// Decompress
+decoded := fastpfor.UnpackDelta(nil, encoded)
+```
+
+Reuse buffers to avoid allocations in hot paths:
+
+```go
+
+// Pre-allocate buffers
+encodeBuf := make([]byte, 0, fastpfor.MaxBlockSize())
+decodeBuf := make([]uint32, 0, 128)
+scratch := make([]uint32, 128)
+
+for _, block := range blocks {
+    // Reuse buffers by slicing to zero length
+    encoded := fastpfor.PackDelta(encodeBuf[:0], block, scratch)
+    decoded := fastpfor.UnpackDelta(decodeBuf[:0], encoded)
+    // Process decoded...
+}
+```
+
 ## Serialization format
 
 The serialized binary format is:
