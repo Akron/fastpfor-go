@@ -462,25 +462,57 @@ func zigzagEncodeSIMDAsm(buf *uint32, n int)
 func zigzagDecodeSIMDAsm(buf *uint32, n int)
 
 // deltaEncodeSIMD encodes the deltas of src into dst using SIMD instructions.
+// This function uses aligned temporary buffers to satisfy SIMD alignment requirements.
 func deltaEncodeSIMD(dst, src []uint32) bool {
-	if len(src) == 0 {
+	n := len(src)
+	if n == 0 {
 		return false
 	}
-	need := deltaEncodeSIMDAsm(&dst[0], &src[0], len(src))
+	if n > blockSize {
+		// Fall back to scalar for oversized input
+		return deltaEncodeScalar(dst, src)
+	}
+
+	// Use aligned temporary buffers for SIMD operations
+	var srcStorage [blockSize + 4]uint32
+	srcBuf := alignedUint32Slice(&srcStorage)
+	copy(srcBuf[:n], src)
+
+	var dstStorage [blockSize + 4]uint32
+	dstBuf := alignedUint32Slice(&dstStorage)
+
+	need := deltaEncodeSIMDAsm(&dstBuf[0], &srcBuf[0], n)
 	if need != 0 {
-		zigzagEncodeSIMDAsm(&dst[0], len(src))
+		zigzagEncodeSIMDAsm(&dstBuf[0], n)
+		copy(dst[:n], dstBuf[:n])
 		return true
 	}
+	copy(dst[:n], dstBuf[:n])
 	return false
 }
 
 // deltaDecodeSIMD decodes the deltas of src into dst using SIMD instructions.
+// This function uses aligned temporary buffers to satisfy SIMD alignment requirements
+// and avoids mutating the input deltas slice.
 func deltaDecodeSIMD(dst, deltas []uint32, useZigZag bool) {
-	if len(deltas) == 0 {
+	n := len(deltas)
+	if n == 0 {
 		return
 	}
-	if useZigZag {
-		zigzagDecodeSIMDAsm(&deltas[0], len(deltas))
+	if n > blockSize {
+		// Fall back to scalar for oversized input
+		deltaDecodeScalar(dst, deltas, useZigZag)
+		return
 	}
-	deltaDecodeSIMDAsm(&dst[0], &deltas[0], len(deltas))
+
+	// Use aligned temporary buffer for SIMD operations
+	var tmpStorage [blockSize + 4]uint32
+	tmp := alignedUint32Slice(&tmpStorage)
+	copy(tmp[:n], deltas)
+
+	if useZigZag {
+		zigzagDecodeSIMDAsm(&tmp[0], n)
+	}
+	deltaDecodeSIMDAsm(&tmp[0], &tmp[0], n)
+	copy(dst[:n], tmp[:n])
 }

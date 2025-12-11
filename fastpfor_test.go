@@ -622,6 +622,203 @@ func TestZigZagEncodeDecode32(t *testing.T) {
 	}
 }
 
+// TestDeltaDecodeSIMDInPlaceZigZag verifies that deltaDecodeSIMD correctly handles
+// the case where dst and deltas are the same slice and useZigZag is true.
+// This is a regression test for a bug where zigzagDecodeSIMDAsm mutated the input
+// slice in place, corrupting deltas before the prefix-sum completed.
+func TestDeltaDecodeSIMDInPlaceZigZag(t *testing.T) {
+	assert := assert.New(t)
+
+	// Log whether SIMD is available
+	t.Logf("SIMD available: %v", IsSIMDavailable())
+
+	// Create test values with negative deltas (requires zigzag encoding)
+	original := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
+
+	// Encode deltas with zigzag
+	deltas := make([]uint32, len(original))
+	useZigZag := deltaEncodeScalar(deltas, original)
+	assert.True(useZigZag, "expected zigzag encoding for negative deltas")
+	t.Logf("Encoded deltas: %v", deltas)
+
+	// Test scalar version first (should always work)
+	scalarResult := make([]uint32, len(original))
+	copy(scalarResult, deltas)
+	deltaDecodeScalar(scalarResult, scalarResult, useZigZag)
+	assert.Equal(original, scalarResult, "scalar decode with same dst/src should work")
+
+	// Test the current deltaDecode function pointer (may be SIMD or scalar)
+	// This is the actual code path used by UnpackDelta
+	simdResult := make([]uint32, len(original))
+	copy(simdResult, deltas)
+	deltaDecode(simdResult, simdResult, useZigZag) // This is what UnpackDelta does
+	assert.Equal(original, simdResult, "deltaDecode with same dst/src and zigzag should work")
+
+	// Verify SIMD matches scalar exactly
+	assert.Equal(scalarResult, simdResult, "SIMD and scalar results should match")
+}
+
+// TestDeltaDecodeSIMDvScalarComparison directly compares SIMD and scalar
+// implementations to ensure they produce identical results for various inputs.
+func TestDeltaDecodeSIMDvScalarComparison(t *testing.T) {
+	if !IsSIMDavailable() {
+		t.Skip("SIMD not available")
+	}
+
+	testCases := []struct {
+		name   string
+		values []uint32
+	}{
+		{"short_zigzag", []uint32{1000, 900, 950, 800, 1200}},
+		{"medium_zigzag", genMixed(64)},
+		{"full_block_zigzag", genMixed(128)},
+		{"alternating", func() []uint32 {
+			v := make([]uint32, 64)
+			for i := range v {
+				if i%2 == 0 {
+					v[i] = uint32(1000 + i*10)
+				} else {
+					v[i] = uint32(500 + i*5)
+				}
+			}
+			return v
+		}()},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+
+			// Encode with zigzag
+			deltas := make([]uint32, len(tc.values))
+			useZigZag := deltaEncodeScalar(deltas, tc.values)
+			if !useZigZag {
+				t.Skip("test case doesn't require zigzag")
+			}
+
+			// Decode with scalar (using separate buffers)
+			scalarDeltas := make([]uint32, len(deltas))
+			copy(scalarDeltas, deltas)
+			scalarResult := make([]uint32, len(tc.values))
+			deltaDecodeScalar(scalarResult, scalarDeltas, useZigZag)
+
+			// Decode with deltaDecode (which uses SIMD when available)
+			// Using same slice for dst and deltas (the typical UnpackDelta case)
+			simdResult := make([]uint32, len(deltas))
+			copy(simdResult, deltas)
+			deltaDecode(simdResult, simdResult, useZigZag)
+
+			// Compare
+			assert.Equal(tc.values, scalarResult, "scalar failed to recover original")
+			assert.Equal(tc.values, simdResult, "SIMD failed to recover original")
+			assert.Equal(scalarResult, simdResult, "SIMD and scalar results differ")
+		})
+	}
+}
+
+// TestDeltaDecodeDoesNotMutateInput verifies that deltaDecode does not mutate
+// the input deltas slice when dst and deltas are different slices.
+// This is a regression test for a bug where the SIMD path mutated deltas in-place.
+func TestDeltaDecodeDoesNotMutateInput(t *testing.T) {
+	assert := assert.New(t)
+
+	// Create test values with negative deltas (requires zigzag encoding)
+	original := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
+
+	// Encode deltas with zigzag
+	deltas := make([]uint32, len(original))
+	useZigZag := deltaEncodeScalar(deltas, original)
+	assert.True(useZigZag, "expected zigzag encoding for negative deltas")
+
+	// Make a copy to verify deltas aren't mutated
+	deltasCopy := make([]uint32, len(deltas))
+	copy(deltasCopy, deltas)
+
+	// Decode with dst != deltas
+	dst := make([]uint32, len(original))
+	deltaDecode(dst, deltas, useZigZag)
+
+	// Verify the result is correct
+	assert.Equal(original, dst, "decode failed")
+
+	// Verify deltas was not mutated
+	assert.Equal(deltasCopy, deltas, "deltaDecode mutated input deltas slice")
+}
+
+// TestUnpackDeltaZigZagRegression is an end-to-end test for the zigzag+delta
+// decoding bug where SIMD path corrupted data when dst==deltas.
+func TestUnpackDeltaZigZagRegression(t *testing.T) {
+	assert := assert.New(t)
+
+	// Values that trigger zigzag encoding (has negative deltas)
+	testCases := [][]uint32{
+		{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901},
+		{100, 50, 75, 25, 200, 150, 300, 100},
+		genMixed(64),  // Random fluctuations
+		genMixed(128), // Full block with fluctuations
+	}
+
+	for i, original := range testCases {
+		t.Run(fmt.Sprintf("case_%d_len_%d", i, len(original)), func(t *testing.T) {
+			scratch := make([]uint32, blockSize)
+			buf := PackDelta(nil, original, scratch)
+
+			// Verify zigzag flag is set (confirms we're testing the right path)
+			header := binary.LittleEndian.Uint32(buf[:headerBytes])
+			_, _, _, hasZigZag := decodeHeader(header)
+			if !hasZigZag {
+				t.Skip("test case doesn't trigger zigzag encoding")
+			}
+
+			// UnpackDelta uses deltaDecode(dst, dst, useZigZag)
+			result := UnpackDelta(nil, buf)
+			assert.Equal(original, result, "UnpackDelta zigzag round-trip failed")
+		})
+	}
+}
+
+// TestDeltaDecodeInPlaceAliasing explicitly tests that deltaDecode handles
+// the dst==deltas aliasing case correctly with zigzag encoding.
+// This uses PackDelta/UnpackDelta end-to-end to ensure proper handling.
+func TestDeltaDecodeInPlaceAliasing(t *testing.T) {
+	assert := assert.New(t)
+	t.Logf("SIMD available: %v", IsSIMDavailable())
+
+	// Test cases with various sizes to exercise different code paths
+	sizes := []int{8, 16, 32, 64, 128}
+
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("size_%d", size), func(t *testing.T) {
+			// Create data with negative deltas to trigger zigzag
+			original := make([]uint32, size)
+			val := uint32(10000)
+			for i := range original {
+				if i%3 == 0 {
+					val -= uint32(100 + i*7)
+				} else {
+					val += uint32(50 + i*3)
+				}
+				original[i] = val
+			}
+
+			// Use PackDelta/UnpackDelta end-to-end
+			scratch := make([]uint32, blockSize)
+			buf := PackDelta(nil, original, scratch)
+
+			// Verify zigzag flag is set
+			header := binary.LittleEndian.Uint32(buf[:headerBytes])
+			_, _, _, hasZigZag := decodeHeader(header)
+			if !hasZigZag {
+				t.Skip("couldn't create data that triggers zigzag")
+			}
+
+			// UnpackDelta uses deltaDecode(dst, dst, useZigZag)
+			result := UnpackDelta(nil, buf)
+			assert.Equal(original, result, "zigzag delta round-trip failed for size %d", size)
+		})
+	}
+}
+
 // -----------------------------------------------------------------------------
 // StreamVByte exception compression tests
 // -----------------------------------------------------------------------------
