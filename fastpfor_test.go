@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/mhr3/streamvbyte"
@@ -269,9 +270,8 @@ func TestPackDeltaHandlesMixedLargeDiffs(t *testing.T) {
 // TestPackDeltaMonotonicDoesNotSetZigZag ensures monotonic deltas skip zigzag flag.
 func TestPackDeltaMonotonicDoesNotSetZigZag(t *testing.T) {
 	assert := assert.New(t)
-	src := genMonotonic(32)
-	packScratch := make([]uint32, blockSize)
-	buf := PackDelta(nil, src, packScratch)
+	src := slices.Clone(genMonotonic(32))
+	buf := PackDelta(nil, src)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	_, _, _, hasZigZag := decodeHeader(header)
 	assert.False(hasZigZag, "monotonic data should not require zigzag encoding")
@@ -286,15 +286,15 @@ func TestPackDeltaMonotonicDoesNotSetZigZag(t *testing.T) {
 // TestPackUnpackDeltaZigZagHeader checks that negative deltas toggle zigzag encoding.
 func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 	assert := assert.New(t)
-	src := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
-	packScratch := make([]uint32, blockSize)
-	buf := PackDelta(nil, src, packScratch)
+	original := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
+	src := slices.Clone(original)
+	buf := PackDelta(nil, src)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	_, _, _, hasZigZag := decodeHeader(header)
 	assert.True(hasZigZag, "expected zigzag flag for negative deltas")
 
 	got := UnpackDelta(nil, buf)
-	assert.Equal(src, got, "zigzag delta round-trip mismatch")
+	assert.Equal(original, got, "zigzag delta round-trip mismatch")
 	// Even though this block only stores 9 logical values, the lane layout would still
 	// serialize a full 4×32 payload if bitWidth > 0. It's therefore cheaper to set the
 	// width to zero and spill every non-zero value into the exception table.
@@ -305,26 +305,26 @@ func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 // TestPackUnpackDeltaZigZagWithExceptions verifies zigzagged data can still patch outliers.
 func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 	assert := assert.New(t)
-	src := make([]uint32, 64)
+	original := make([]uint32, 64)
 	value := uint32(1 << 20)
-	for i := range src {
+	for i := range original {
 		switch i {
 		case 0:
-			src[i] = value
+			original[i] = value
 		case 20:
 			value -= 5000
-			src[i] = value
+			original[i] = value
 		case 40:
 			value += 1 << 24
-			src[i] = value
+			original[i] = value
 		default:
 			value++
-			src[i] = value
+			original[i] = value
 		}
 	}
 
-	packScratch := make([]uint32, blockSize)
-	buf := PackDelta(nil, src, packScratch)
+	src := slices.Clone(original)
+	buf := PackDelta(nil, src)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
 	_, _, hasExceptions, hasZigZag := decodeHeader(header)
 	assert.True(hasZigZag, "expected zigzag flag when negative delta present")
@@ -332,7 +332,7 @@ func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 	assert.Equal(3, getExceptionCount(buf))
 	assert.Equal(2, getBitWidth(buf))
 	got := UnpackDelta(nil, buf)
-	assert.Equal(src, got, "zigzag delta with exceptions round-trip mismatch")
+	assert.Equal(original, got, "zigzag delta with exceptions round-trip mismatch")
 }
 
 // -----------------------------------------------------------------------------
@@ -760,8 +760,8 @@ func TestUnpackDeltaZigZagRegression(t *testing.T) {
 
 	for i, original := range testCases {
 		t.Run(fmt.Sprintf("case_%d_len_%d", i, len(original)), func(t *testing.T) {
-			scratch := make([]uint32, blockSize)
-			buf := PackDelta(nil, original, scratch)
+			src := slices.Clone(original)
+			buf := PackDelta(nil, src)
 
 			// Verify zigzag flag is set (confirms we're testing the right path)
 			header := binary.LittleEndian.Uint32(buf[:headerBytes])
@@ -802,8 +802,8 @@ func TestDeltaDecodeInPlaceAliasing(t *testing.T) {
 			}
 
 			// Use PackDelta/UnpackDelta end-to-end
-			scratch := make([]uint32, blockSize)
-			buf := PackDelta(nil, original, scratch)
+			src := slices.Clone(original)
+			buf := PackDelta(nil, src)
 
 			// Verify zigzag flag is set
 			header := binary.LittleEndian.Uint32(buf[:headerBytes])
@@ -1003,19 +1003,20 @@ func BenchmarkUnpack(b *testing.B) {
 }
 
 func BenchmarkPackDelta(b *testing.B) {
-	data := genMonotonic(blockSize)
-	scratch := make([]uint32, blockSize)
+	source := genMonotonic(blockSize)
+	data := make([]uint32, blockSize)
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
 	for range b.N {
-		dst = PackDelta(dst[:0], data, scratch)
+		copy(data, source)
+		dst = PackDelta(dst[:0], data)
 	}
 	resultBytes = dst
 }
 
 func BenchmarkUnpackDelta(b *testing.B) {
-	packScratch := make([]uint32, blockSize)
-	buf := PackDelta(nil, genMonotonic(blockSize), packScratch)
+	source := slices.Clone(genMonotonic(blockSize))
+	buf := PackDelta(nil, source)
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
@@ -1025,19 +1026,20 @@ func BenchmarkUnpackDelta(b *testing.B) {
 }
 
 func BenchmarkPackDeltaMixed(b *testing.B) {
-	data := genMixed(blockSize)
-	scratch := make([]uint32, blockSize)
+	source := genMixed(blockSize)
+	data := make([]uint32, blockSize)
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
 	for range b.N {
-		dst = PackDelta(dst[:0], data, scratch)
+		copy(data, source)
+		dst = PackDelta(dst[:0], data)
 	}
 	resultBytes = dst
 }
 
 func BenchmarkUnpackDeltaMixed(b *testing.B) {
-	packScratch := make([]uint32, blockSize)
-	buf := PackDelta(nil, genMixed(blockSize), packScratch)
+	source := slices.Clone(genMixed(blockSize))
+	buf := PackDelta(nil, source)
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
@@ -1252,8 +1254,9 @@ func assertRoundTrip(t *testing.T, src []uint32) []byte {
 // Check for a roundtrip pack delta <-> unpack delta to ensure, data is equal
 func assertDeltaRoundTrip(t *testing.T, src []uint32) []byte {
 	t.Helper()
-	packScratch := make([]uint32, blockSize)
-	buf := PackDelta(nil, src, packScratch)
+	// Copy src since PackDelta mutates its input
+	data := slices.Clone(src)
+	buf := PackDelta(nil, data)
 	got := UnpackDelta(nil, buf)
 	assert.Equal(t, len(src), len(got), "length mismatch")
 	assert.Equal(t, src, got)

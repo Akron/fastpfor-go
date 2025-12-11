@@ -52,26 +52,28 @@ For sorted or time-series data, use delta encoding for better compression:
 // Monotonically increasing data benefits from delta encoding
 timestamps := []uint32{1000, 1005, 1012, 1018, 1025, 1033, 1040, 1048}
 
-// Compress with delta encoding (requires a scratch buffer)
-scratch := make([]uint32, 128)
-encoded := fastpfor.PackDelta(nil, timestamps, scratch)
+// Compress with delta encoding (mutates timestamps in-place)
+encoded := fastpfor.PackDelta(nil, timestamps)
 
 // Decompress
 decoded := fastpfor.UnpackDelta(nil, encoded)
 ```
 
+**Note:** `PackDelta` performs delta encoding in-place, mutating the input slice.
+If you need to preserve the original values, make a copy first.
+
 Reuse buffers to avoid allocations in hot paths:
 
 ```go
-
 // Pre-allocate buffers
 encodeBuf := make([]byte, 0, fastpfor.MaxBlockSize())
 decodeBuf := make([]uint32, 0, 128)
-scratch := make([]uint32, 128)
+workBuf := make([]uint32, 128)
 
 for _, block := range blocks {
-    // Reuse buffers by slicing to zero length
-    encoded := fastpfor.PackDelta(encodeBuf[:0], block, scratch)
+    // Copy block to working buffer (PackDelta mutates its input)
+    copy(workBuf, block)
+    encoded := fastpfor.PackDelta(encodeBuf[:0], workBuf[:len(block)])
     decoded := fastpfor.UnpackDelta(decodeBuf[:0], encoded)
     // Process decoded...
 }

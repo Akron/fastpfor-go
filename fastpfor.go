@@ -206,21 +206,20 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 	return dst
 }
 
-// PackDelta delta-encodes values prior to calling Pack. Callers provide a
-// scratch buffer (len/cap >= block length) so the wrapper can avoid temporary
-// allocations when preparing the delta payload.
-func PackDelta(dst []byte, values []uint32, scratch []uint32) []byte {
+// PackDelta delta-encodes values in-place prior to calling Pack.
+// WARNING: This function mutates the values slice. If you need to preserve
+// the original values, make a copy before calling PackDelta.
+func PackDelta(dst []byte, values []uint32) []byte {
 	validateBlockLength(len(values))
-	scratch = ensureUint32Len(scratch, len(values))
 	var useZigZag bool
 	if len(values) > 0 {
-		useZigZag = deltaEncode(scratch[:len(values)], values)
+		useZigZag = deltaEncode(values, values) // in-place
 	}
 	var flags uint32
 	if useZigZag {
 		flags |= headerZigZagFlag
 	}
-	return packInternal(dst, scratch[:len(values)], flags)
+	return packInternal(dst, values, flags)
 }
 
 // UnpackDelta reverses PackDelta by unpacking the delta stream and then
@@ -581,28 +580,45 @@ func applyExceptions(dst []uint32, positions []byte, svbData []byte, excCount, b
 	}
 }
 
-// deltaEncodeScalar writes first-order deltas from src into dst (len(dst) == len(src)).
-// Single-pass: encodes raw deltas and detects negative deltas simultaneously.
-// If any negative delta is found, re-encodes the entire buffer with zigzag.
+// deltaEncodeScalar computes first-order deltas in-place (dst may alias src).
+// Processes backward to safely support in-place operation: each position i is
+// overwritten only after all reads from that position are complete.
+// Returns true if zigzag encoding was applied (some deltas were negative).
 func deltaEncodeScalar(dst, src []uint32) bool {
-	var prev uint32
-	needZigZag := false
-	for i, v := range src {
-		dst[i] = v - prev
-		needZigZag = needZigZag || v < prev
-		prev = v
-	}
-	if !needZigZag {
+	n := len(src)
+	if n == 0 {
 		return false
 	}
-	// Re-encode with zigzag (deltas already computed, just need transform)
-	prev = 0
-	for i, v := range src {
-		diff := int32(int64(v) - int64(prev))
-		dst[i] = zigzagEncode32(diff)
-		prev = v
+
+	// Single backward pass: compute deltas, detect negatives, apply zigzag on-the-fly.
+	// When the first negative delta is detected, we "catch up" by applying zigzag
+	// to already-computed deltas, then continue with zigzag for remaining elements.
+	needZigZag := false
+	for i := n - 1; i > 0; i-- {
+		if !needZigZag && src[i] < src[i-1] {
+			// First negative delta: apply zigzag to already-computed deltas
+			needZigZag = true
+			for j := n - 1; j > i; j-- {
+				dst[j] = zigzagEncode32(int32(dst[j]))
+			}
+		}
+
+		delta := src[i] - src[i-1]
+		if needZigZag {
+			dst[i] = zigzagEncode32(int32(delta))
+		} else {
+			dst[i] = delta
+		}
 	}
-	return true
+
+	// First element (delta from implicit 0)
+	if needZigZag {
+		dst[0] = zigzagEncode32(int32(src[0]))
+	} else {
+		dst[0] = src[0]
+	}
+
+	return needZigZag
 }
 
 // deltaDecodeScalar reconstructs the prefix sums encoded by deltaEncode.
