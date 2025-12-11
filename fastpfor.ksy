@@ -7,26 +7,21 @@ imports:
   - streamvbyte
 
 doc: |
-  This is a compression format for arrays of integers. 
+  A single PFor (Patched Frame-of-Reference) compressed block.
+  This is a building block for other integer compression algorithms.
   This definition corresponds to the implementation at https://github.com/akron/fastpfor-go.
 
 seq:
-  - id: blocks
-    type: block
-    repeat: eos
+  - id: header
+    type: header
+  - id: payload
+    type: payload(header.bit_width)
+    size: header.payload_size
+  - id: exceptions
+    type: exceptions
+    if: header.flag_exception
 
 types:
-  block:
-    seq:
-      - id: header
-        type: header
-      - id: payload
-        type: payload(header.bit_width)
-        size: header.payload_size
-      - id: exceptions
-        type: exceptions
-        if: header.flag_exception
-
   header:
     seq:
       - id: raw
@@ -70,10 +65,8 @@ types:
         repeat-expr: count
         doc: Indices of the exceptions in the original block (0-127).
       - id: values
-        type: u4
-        repeat: expr
-        repeat-expr: count
-        doc: High bits of the exception values.
+        type: streamvbyte(count)
+        doc: High bits of the exception values, encoded using StreamVByte.
 
 
 
