@@ -179,31 +179,9 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 
 	// Handle exceptions (StreamVByte format)
 	if hasExceptions {
-		if len(buf) < minNeeded+1 {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing exception count byte at offset %d", minNeeded))
+		if err := applyExceptions(dst, buf, minNeeded, count, bitWidth); err != nil {
+			panic(err)
 		}
-		patch := buf[minNeeded:]
-		excCount := int(patch[0]) // Get the number of exceptions <= 128
-
-		patch = patch[1:]
-		if len(patch) < excCount {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
-		}
-		// Read positions
-		positions := patch[:excCount]
-		patch = patch[excCount:]
-
-		// Read StreamVByte data length
-		if len(patch) < 2 {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing StreamVByte length (need 2 bytes, got %d)", len(patch)))
-		}
-		svbLen := int(bo.Uint16(patch[:2]))
-		patch = patch[2:]
-
-		if len(patch) < svbLen {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
-		}
-		applyExceptions(dst[:count], positions, patch[:svbLen], excCount, bitWidth)
 	}
 
 	// Apply delta decoding if the data was delta-encoded
@@ -570,21 +548,47 @@ func writeExceptions(dst []byte, exceptions []exception) int {
 	return pos + 2 + svbLen
 }
 
-// applyExceptions patches the unpacked values by reinserting the high parts
-// that were spilled into the exception table. This matches the logic in
-// FastPFOR where the truncated packed values are OR'ed with (high << width).
-// The values slice contains StreamVByte-encoded high bits.
-func applyExceptions(dst []uint32, positions []byte, svbData []byte, excCount, bitWidth int) {
-	// Decode high bits from StreamVByte
-	highBits := streamvbyte.DecodeUint32(svbData, excCount, nil)
+// applyExceptions reads exception data from buf at the given offset and applies
+// them to dst by reinserting the high parts that were spilled into the exception table.
+// Returns an error if the buffer is malformed.
+// Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
+func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int) error {
+	if len(buf) < offset+1 {
+		return fmt.Errorf("fastpfor: missing exception count byte at offset %d", offset)
+	}
 
+	patch := buf[offset:]
+	excCount := int(patch[0])
+	patch = patch[1:]
+
+	if len(patch) < excCount {
+		return fmt.Errorf("fastpfor: truncated exception positions (need %d bytes, got %d)", excCount, len(patch))
+	}
+
+	positions := patch[:excCount]
+	patch = patch[excCount:]
+
+	if len(patch) < 2 {
+		return fmt.Errorf("fastpfor: missing StreamVByte length (need 2 bytes, got %d)", len(patch))
+	}
+
+	svbLen := int(bo.Uint16(patch[:2]))
+	patch = patch[2:]
+
+	if len(patch) < svbLen {
+		return fmt.Errorf("fastpfor: truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch))
+	}
+
+	// Decode high bits from StreamVByte and apply to dst
+	highBits := streamvbyte.DecodeUint32(patch[:svbLen], excCount, nil)
 	for i, idx := range positions {
-		if int(idx) >= len(dst) {
-			panic(fmt.Sprintf("fastpfor: exception index %d out of range (max %d)", int(idx), len(dst)-1))
+		if int(idx) >= count {
+			return fmt.Errorf("fastpfor: exception index %d out of range (max %d)", int(idx), count-1)
 		}
 		// OR the high bits of the exception value into the unpacked value at the specified index
 		dst[int(idx)] |= highBits[i] << bitWidth
 	}
+	return nil
 }
 
 // deltaEncodeScalar computes first-order deltas in-place (dst may alias src).

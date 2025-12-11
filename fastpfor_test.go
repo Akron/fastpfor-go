@@ -701,25 +701,42 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 	t.Run("patchesValues", func(t *testing.T) {
 		dst := []uint32{1, 2, 3, 4}
 		positions := []byte{1, 3}
-		// Encode high bits using StreamVByte
 		highBits := []uint32{5, 2}
-		svbData := encodeHighBitsForTest(highBits)
+		buf := buildExceptionBuf(positions, highBits)
 
-		applyExceptions(dst, positions, svbData, len(positions), 3)
-
+		err := applyExceptions(dst, buf, 0, len(dst), 3)
+		assert.NoError(err)
 		assert.Equal(uint32(2)|(5<<3), dst[1], "unexpected patch at index 1")
 		assert.Equal(uint32(4)|(2<<3), dst[3], "unexpected patch at index 3")
 	})
 
-	t.Run("panicsOnOutOfRange", func(t *testing.T) {
+	t.Run("errorOnOutOfRange", func(t *testing.T) {
 		dst := make([]uint32, 4)
-		positions := []byte{byte(len(dst))}
-		svbData := encodeHighBitsForTest([]uint32{1})
-		assert.PanicsWithValue(
-			fmt.Sprintf("fastpfor: exception index %d out of range (max %d)", len(dst), len(dst)-1),
-			func() { applyExceptions(dst, positions, svbData, 1, 5) },
-		)
+		positions := []byte{byte(len(dst))} // index 4 is out of range for 4-element slice
+		buf := buildExceptionBuf(positions, []uint32{1})
+		err := applyExceptions(dst, buf, 0, len(dst), 5)
+		assert.Error(err)
+		assert.Contains(err.Error(), fmt.Sprintf("exception index %d out of range", len(dst)))
 	})
+
+	t.Run("errorOnTruncatedBuffer", func(t *testing.T) {
+		dst := make([]uint32, 4)
+		err := applyExceptions(dst, []byte{}, 0, len(dst), 5)
+		assert.Error(err)
+		assert.Contains(err.Error(), "missing exception count byte")
+	})
+}
+
+// buildExceptionBuf creates a properly formatted exception buffer for testing.
+// Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
+func buildExceptionBuf(positions []byte, highBits []uint32) []byte {
+	svbData := encodeHighBitsForTest(highBits)
+	buf := make([]byte, 1+len(positions)+2+len(svbData))
+	buf[0] = byte(len(positions))
+	copy(buf[1:], positions)
+	binary.LittleEndian.PutUint16(buf[1+len(positions):], uint16(len(svbData)))
+	copy(buf[1+len(positions)+2:], svbData)
+	return buf
 }
 
 // TestDeltaEncodeDecodeScalar directly exercises the scalar delta helpers to
