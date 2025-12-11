@@ -37,11 +37,11 @@ func main() {
     values := []uint32{10, 20, 30, 40, 50, 60, 70, 80}
 
     // Compress
-    encoded := fastpfor.Pack(nil, values)
+    encoded := fastpfor.PackUint32(nil, values)
     fmt.Printf("Compressed %d integers into %d bytes\n", len(values), len(encoded))
 
     // Decompress
-    decoded := fastpfor.Unpack(nil, encoded)
+    decoded := fastpfor.UnpackUint32(nil, encoded)
     fmt.Println("Decoded:", decoded)
 }
 ```
@@ -53,28 +53,28 @@ For sorted or time-series data, use delta encoding for better compression:
 timestamps := []uint32{1000, 1005, 1012, 1018, 1025, 1033, 1040, 1048}
 
 // Compress with delta encoding (mutates timestamps in-place)
-encoded := fastpfor.PackDelta(nil, timestamps)
+encoded := fastpfor.PackDeltaUint32(nil, timestamps)
 
 // Decompress
-decoded := fastpfor.UnpackDelta(nil, encoded)
+decoded := fastpfor.UnpackDeltaUint32(nil, encoded)
 ```
 
-**Note:** `PackDelta` performs delta encoding in-place, mutating the input slice.
+**Note:** `PackDeltaUint32` performs delta encoding in-place, mutating the input slice.
 If you need to preserve the original values, make a copy first.
 
 Reuse buffers to avoid allocations in hot paths:
 
 ```go
 // Pre-allocate buffers
-encodeBuf := make([]byte, 0, fastpfor.MaxBlockSize())
+encodeBuf := make([]byte, 0, fastpfor.MaxBlockSizeUint32())
 decodeBuf := make([]uint32, 0, 128)
 workBuf := make([]uint32, 128)
 
 for _, block := range blocks {
-    // Copy block to working buffer (PackDelta mutates its input)
+    // Copy block to working buffer (PackDeltaUint32 mutates its input)
     copy(workBuf, block)
-    encoded := fastpfor.PackDelta(encodeBuf[:0], workBuf[:len(block)])
-    decoded := fastpfor.UnpackDelta(decodeBuf[:0], encoded)
+    encoded := fastpfor.PackDeltaUint32(encodeBuf[:0], workBuf[:len(block)])
+    decoded := fastpfor.UnpackDeltaUint32(decodeBuf[:0], encoded)
     // Process decoded...
 }
 ```

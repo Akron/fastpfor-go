@@ -4,7 +4,7 @@
 // Each block begins with a 32-bit header describing the bit width of the packed
 // lane sets followed by the interleaved payload (4 SIMD-friendly lanes) and a
 // patch area for exception values. Callers provide the destination slices to
-// Pack/Unpack so higher-level codecs can reuse buffers without repeated heap
+// PackUint32/UnpackUint32 so higher-level codecs can reuse buffers without repeated heap
 // allocations. The package maintains no global mutable state.
 package fastpfor
 
@@ -17,7 +17,7 @@ import (
 	"github.com/mhr3/streamvbyte"
 )
 
-// Block configuration constants. Pack/Unpack always operates on at most 128
+// Block configuration constants. PackUint32/UnpackUint32 always operates on at most 128
 // integers, interleaved into 4 lanes to match the SIMD-PFOR layout.
 const (
 	// blockSize is the fixed FastPFOR block length (4 lanes × 32 elements).
@@ -85,8 +85,8 @@ func IsSIMDavailable() bool {
 	return simdAvailable
 }
 
-// MaxBlockSize returns the maximum number of bytes needed to store a block of values.
-func MaxBlockSize() int {
+// MaxBlockSizeUint32 returns the maximum number of bytes needed to store a block of values.
+func MaxBlockSizeUint32() int {
 	return headerBytes + (blockSize * 4)
 }
 
@@ -97,15 +97,15 @@ type exception struct {
 	high  uint32
 }
 
-// Pack encodes up to BlockSize uint32 values into the FastPFOR block format.
+// PackUint32 encodes up to BlockSize uint32 values into the FastPFOR block format.
 // The function appends the block to dst so the caller can reuse buffers and
 // avoid per-block allocations. Callers must not reuse the same dst slice across
-// concurrent Pack invocations unless they coordinate access themselves.
+// concurrent PackUint32 invocations unless they coordinate access themselves.
 // Each block writes:
 //   - Header (count, bit width, exception flag)
 //   - Interleaved lane payload packed at the chosen width
 //   - Optional exception table (count byte, positions, high bits)
-func Pack(dst []byte, values []uint32) []byte {
+func PackUint32(dst []byte, values []uint32) []byte {
 	return packInternal(dst, values, 0)
 }
 
@@ -149,11 +149,11 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	return dst[:start+actualTotal]
 }
 
-// Unpack decodes a Pack-produced buffer back into uint32 values, writing into
+// UnpackUint32 decodes a PackUint32-produced buffer back into uint32 values, writing into
 // the supplied dst slice (which will be resized as needed).
-func Unpack(dst []uint32, buf []byte) []uint32 {
+func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
-		panic(fmt.Sprintf("fastpfor: Unpack buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
+		panic(fmt.Sprintf("fastpfor: UnpackUint32 buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
 	count, bitWidth, hasExceptions, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	validateBlockLength(count)
@@ -177,14 +177,14 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 	// Handle exceptions (StreamVByte format)
 	if hasExceptions {
 		if len(buf) < minNeeded+1 {
-			panic(fmt.Sprintf("fastpfor: Unpack missing exception count byte at offset %d", minNeeded))
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing exception count byte at offset %d", minNeeded))
 		}
 		patch := buf[minNeeded:]
 		excCount := int(patch[0]) // Get the number of exceptions <= 128
 
 		patch = patch[1:]
 		if len(patch) < excCount {
-			panic(fmt.Sprintf("fastpfor: Unpack truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
 		}
 		// Read positions
 		positions := patch[:excCount]
@@ -192,13 +192,13 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 
 		// Read StreamVByte data length
 		if len(patch) < 2 {
-			panic(fmt.Sprintf("fastpfor: Unpack missing StreamVByte length (need 2 bytes, got %d)", len(patch)))
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing StreamVByte length (need 2 bytes, got %d)", len(patch)))
 		}
 		svbLen := int(bo.Uint16(patch[:2]))
 		patch = patch[2:]
 
 		if len(patch) < svbLen {
-			panic(fmt.Sprintf("fastpfor: Unpack truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
 		}
 		applyExceptions(dst[:count], positions, patch[:svbLen], excCount, bitWidth)
 	}
@@ -206,10 +206,10 @@ func Unpack(dst []uint32, buf []byte) []uint32 {
 	return dst
 }
 
-// PackDelta delta-encodes values in-place prior to calling Pack.
+// PackDeltaUint32 delta-encodes values in-place prior to calling PackUint32.
 // WARNING: This function mutates the values slice. If you need to preserve
-// the original values, make a copy before calling PackDelta.
-func PackDelta(dst []byte, values []uint32) []byte {
+// the original values, make a copy before calling PackDeltaUint32.
+func PackDeltaUint32(dst []byte, values []uint32) []byte {
 	validateBlockLength(len(values))
 	var useZigZag bool
 	if len(values) > 0 {
@@ -222,15 +222,15 @@ func PackDelta(dst []byte, values []uint32) []byte {
 	return packInternal(dst, values, flags)
 }
 
-// UnpackDelta reverses PackDelta by unpacking the delta stream and then
+// UnpackDeltaUint32 reverses PackDeltaUint32 by unpacking the delta stream and then
 // performing a prefix sum (optionally zigzag-decoded) in place.
-func UnpackDelta(dst []uint32, buf []byte) []uint32 {
+func UnpackDeltaUint32(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
-		panic(fmt.Sprintf("fastpfor: UnpackDelta buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
+		panic(fmt.Sprintf("fastpfor: UnpackDeltaUint32 buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
 	header := bo.Uint32(buf[:headerBytes])
 	_, _, _, useZigZag := decodeHeader(header)
-	dst = Unpack(dst[:0], buf)
+	dst = UnpackUint32(dst[:0], buf)
 	if len(dst) == 0 {
 		return dst
 	}
@@ -286,12 +286,14 @@ func patchBytesMax(exceptionCount int) int {
 
 // patchBytesExact returns the exact byte count for a given exception table with
 // the StreamVByte-encoded high bits already computed.
+/*
 func patchBytesExact(exceptionCount, svbLen int) int {
 	if exceptionCount == 0 {
 		return 0
 	}
 	return 1 + exceptionCount + 2 + svbLen
 }
+*/
 
 // encodeHeader encodes the header for a block. It combines the count, bit width, and flags.
 func encodeHeader(count, bitWidth int, flags uint32) uint32 {

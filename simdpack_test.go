@@ -16,7 +16,7 @@ func TestSIMDPackRoundTrip(t *testing.T) {
 		}
 		payload := make([]byte, bitWidth*16)
 		if !simdPack(payload, values, bitWidth) {
-			t.Fatalf("Pack returned false at width %d", bitWidth)
+			t.Fatalf("PackUint32 returned false at width %d", bitWidth)
 		}
 		got := make([]uint32, len(values))
 		if !simdUnpack(got, payload, bitWidth, len(values)) {
@@ -38,7 +38,7 @@ func TestSIMDPackRoundTripShort(t *testing.T) {
 	const bitWidth = 3
 	payload := make([]byte, bitWidth*16)
 	if !simdPack(payload, values, bitWidth) {
-		t.Fatalf("Pack returned false")
+		t.Fatalf("PackUint32 returned false")
 	}
 	got := make([]uint32, len(values))
 	if !simdUnpack(got, payload, bitWidth, len(values)) {
