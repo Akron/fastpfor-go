@@ -104,7 +104,7 @@ func TestPackFullBlockRandom16BitCompression(t *testing.T) {
 // TestPackBitWidthCoverage walks widths 2..32 and confirms deterministic payloads.
 func TestPackBitWidthCoverage(t *testing.T) {
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
-	dst := make([]uint32, blockSize)
+	dst := make([]uint32, 2*blockSize) // cap >= 256 for zero-allocation
 
 	// Note: the width 0 is not supported, so we start at 2
 	for width := 2; width <= 32; width++ {
@@ -139,7 +139,7 @@ func TestPackBitWidthCoverage(t *testing.T) {
 func TestPackBitWidthExamples(t *testing.T) {
 	assert := assert.New(t)
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
-	dst := make([]uint32, blockSize)
+	dst := make([]uint32, 2*blockSize) // cap >= 256 for zero-allocation
 
 	// Width 2 (no exceptions): simple repeating pattern that fits in two bits.
 	{
@@ -407,7 +407,7 @@ func TestPackUnpackWithExceptions(t *testing.T) {
 func TestPackBitWidthExceptionExamples(t *testing.T) {
 	assert := assert.New(t)
 	buf := make([]byte, 0, headerBytes+payloadBytes(32))
-	dst := make([]uint32, blockSize)
+	dst := make([]uint32, 2*blockSize) // cap >= 256 for zero-allocation
 
 	// Width 5 (with exceptions): low values plus a few spikes that trigger patches.
 	{
@@ -514,7 +514,7 @@ func TestUnpackReusesDst(t *testing.T) {
 	assert := assert.New(t)
 	input := []uint32{5, 6, 7, 8}
 	buf := PackUint32(nil, input)
-	dst := make([]uint32, blockSize)
+	dst := make([]uint32, 2*blockSize) // cap >= 256 for zero-allocation
 	out, err := UnpackUint32(dst[:0], buf)
 	assert.NoError(err)
 	assert.Equal(len(input), len(out), "length mismatch")
@@ -694,7 +694,7 @@ func TestPackUnpackLanesScalar(t *testing.T) {
 		payload := make([]byte, payloadBytes(width))
 		packLanesScalar(payload, values, width)
 
-		dst := make([]uint32, blockSize)
+		dst := make([]uint32, 2*blockSize) // cap >= 256 for zero-allocation
 		for i := range dst {
 			dst[i] = mathMaxUint32 // sentinel to ensure untouched slots stay intact
 		}
@@ -713,11 +713,12 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 
 	t.Run("patchesValues", func(t *testing.T) {
 		dst := []uint32{1, 2, 3, 4}
+		scratch := make([]uint32, blockSize)
 		positions := []byte{1, 3}
 		highBits := []uint32{5, 2}
 		buf := buildExceptionBuf(positions, highBits)
 
-		err := applyExceptions(dst, buf, 0, len(dst), 3)
+		err := applyExceptions(dst, buf, 0, len(dst), 3, scratch)
 		assert.NoError(err)
 		assert.Equal(uint32(2)|(5<<3), dst[1], "unexpected patch at index 1")
 		assert.Equal(uint32(4)|(2<<3), dst[3], "unexpected patch at index 3")
@@ -725,16 +726,18 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 
 	t.Run("errorOnOutOfRange", func(t *testing.T) {
 		dst := make([]uint32, 4)
+		scratch := make([]uint32, blockSize)
 		positions := []byte{byte(len(dst))} // index 4 is out of range for 4-element slice
 		buf := buildExceptionBuf(positions, []uint32{1})
-		err := applyExceptions(dst, buf, 0, len(dst), 5)
+		err := applyExceptions(dst, buf, 0, len(dst), 5, scratch)
 		assert.Error(err)
 		assert.Contains(err.Error(), fmt.Sprintf("exception index %d out of range", len(dst)))
 	})
 
 	t.Run("errorOnTruncatedBuffer", func(t *testing.T) {
 		dst := make([]uint32, 4)
-		err := applyExceptions(dst, []byte{}, 0, len(dst), 5)
+		scratch := make([]uint32, blockSize)
+		err := applyExceptions(dst, []byte{}, 0, len(dst), 5, scratch)
 		assert.Error(err)
 		assert.Contains(err.Error(), "missing exception count byte")
 	})
@@ -1297,7 +1300,7 @@ func BenchmarkUnpackDeltaUint32(b *testing.B) {
 
 func BenchmarkPackDeltaMixed(b *testing.B) {
 	source := genMixed(blockSize)
-	data := make([]uint32, blockSize)
+	data := make([]uint32, blockSize, 2*blockSize) // cap >= 256 for zero-alloc
 	dst := make([]byte, 0, headerBytes+payloadBytes(16))
 	b.ReportAllocs()
 	for range b.N {
@@ -1424,7 +1427,7 @@ func genValuesForBitWidth(width int) []uint32 {
 // genDataWithSmallExceptions creates data with small exception high bits for benchmarking.
 // Most values fit in 8 bits, with some 9-10 bit values as exceptions.
 func genDataWithSmallExceptions() []uint32 {
-	out := make([]uint32, blockSize)
+	out := make([]uint32, blockSize, 2*blockSize) // cap >= 256 for zero-alloc
 	for i := range out {
 		out[i] = uint32(i % 256) // 8-bit base values
 	}
@@ -1438,7 +1441,7 @@ func genDataWithSmallExceptions() []uint32 {
 // genDataWithLargeExceptions creates data with large exception high bits for benchmarking.
 // Simulates worst-case StreamVByte compression scenario.
 func genDataWithLargeExceptions() []uint32 {
-	out := make([]uint32, blockSize)
+	out := make([]uint32, blockSize, 2*blockSize) // cap >= 256 for zero-alloc
 	for i := range out {
 		out[i] = 0 // Base values all zero
 	}

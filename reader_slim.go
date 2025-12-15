@@ -227,8 +227,8 @@ applyException:
 
 // getWithDelta decodes values with delta encoding (requires prefix sum).
 func (r *SlimReader) getWithDelta(pos uint32) uint32 {
-	// Stack-allocated buffer for decoding
-	var values [blockSize]uint32
+	// Stack-allocated buffer for decoding (2*blockSize for values + scratch)
+	var values [2 * blockSize]uint32
 
 	count := int(r.count)
 	bitWidth := int(r.bitWidth)
@@ -238,9 +238,10 @@ func (r *SlimReader) getWithDelta(pos uint32) uint32 {
 		unpackLanes(values[:count], r.buf[headerBytes:r.payloadEnd], count, bitWidth)
 	}
 
-	// Apply exceptions if present
+	// Apply exceptions if present, using values[blockSize:] as scratch
 	if r.flags&slimFlagExceptions != 0 {
-		_ = applyExceptions(values[:], r.buf, int(r.payloadEnd), count, bitWidth)
+		scratch := values[blockSize : 2*blockSize]
+		_ = applyExceptions(values[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
 	}
 
 	// Apply delta decoding
@@ -340,8 +341,9 @@ func (r *SlimReader) Decode(dst []uint32) []uint32 {
 		return nil
 	}
 	count := int(r.count)
-	if cap(dst) < count {
-		dst = make([]uint32, count)
+	// Ensure capacity for both values and scratch space (2*blockSize = 256)
+	if cap(dst) < 2*blockSize {
+		dst = make([]uint32, count, 2*blockSize)
 	} else {
 		dst = dst[:count]
 	}
@@ -354,14 +356,15 @@ func (r *SlimReader) Decode(dst []uint32) []uint32 {
 
 	// Decode packed values
 	if bitWidth == 0 {
-		clear(dst)
+		clear(dst[:count])
 	} else {
-		unpackLanes(dst, r.buf[headerBytes:r.payloadEnd], count, bitWidth)
+		unpackLanes(dst[:count], r.buf[headerBytes:r.payloadEnd], count, bitWidth)
 	}
 
-	// Apply exceptions if present
+	// Apply exceptions if present, using dst[blockSize:] as scratch
 	if r.flags&slimFlagExceptions != 0 {
-		_ = applyExceptions(dst, r.buf, int(r.payloadEnd), count, bitWidth)
+		scratch := dst[blockSize : 2*blockSize]
+		_ = applyExceptions(dst[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
 	}
 
 	// Apply delta decoding if needed

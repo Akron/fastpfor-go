@@ -70,10 +70,11 @@ If you need to preserve the original values, make a copy first.
 Reuse buffers to avoid allocations in hot paths:
 
 ```go
-// Pre-allocate buffers
+// Pre-allocate buffers with cap >= 256 for zero-allocation operation.
+// The extra capacity (positions 128-255) is used as scratch space for exceptions.
 encodeBuf := make([]byte, 0, fastpfor.MaxBlockSizeUint32())
-decodeBuf := make([]uint32, 0, 128)
-workBuf := make([]uint32, 128)
+decodeBuf := make([]uint32, 0, 256) // cap >= 256 for zero-alloc unpack
+workBuf := make([]uint32, 128, 256) // cap >= 256 for zero-alloc pack
 
 for _, block := range blocks {
     // Copy block to working buffer (PackDeltaUint32 mutates its input)

@@ -92,13 +92,6 @@ func MaxBlockSizeUint32() int {
 	return headerBytes + (blockSize * 4)
 }
 
-// exception tracks a single patched integer: its index in the block and the
-// high bits that must be re-applied (OR-ed) after unpacking the truncated value.
-type exception struct {
-	index uint8
-	high  uint32
-}
-
 // PackUint32 encodes up to BlockSize uint32 values into the FastPFOR block format.
 // The function appends the block to dst so the caller can reuse buffers and
 // avoid per-block allocations. Callers must not reuse the same dst slice across
@@ -107,6 +100,10 @@ type exception struct {
 //   - Header (count, bit width, exception flag)
 //   - Interleaved lane payload packed at the chosen width
 //   - Optional exception table (count byte, positions, high bits)
+//
+// For zero-allocation operation when data contains exceptions, provide a values
+// slice with cap >= 256. The extra capacity (positions 128-255) is used as scratch
+// space for exception handling.
 func PackUint32(dst []byte, values []uint32) []byte {
 	return packInternal(dst, values, 0)
 }
@@ -117,18 +114,17 @@ func PackUint32(dst []byte, values []uint32) []byte {
 func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	validateBlockLength(len(values))
 	// Select the bit width that minimizes the serialized size.
-	// This will also collect the exceptions.
-	bitWidth, exceptions := selectBitWidth(values)
+	bitWidth, excCount := selectBitWidth(values)
 	// Calculate the length of the payload
 	payloadLen := payloadBytes(bitWidth)
 	// Calculate the maximum length of the block (actual may be smaller due to StreamVByte)
-	maxTotal := headerBytes + payloadLen + patchBytesMax(len(exceptions))
+	maxTotal := headerBytes + payloadLen + patchBytesMax(excCount)
 
 	start := len(dst)
 	dst = slices.Grow(dst, maxTotal)
 	dst = dst[:start+maxTotal]
 	flags := extraFlags
-	if len(exceptions) > 0 {
+	if excCount > 0 {
 		flags |= headerExceptionFlag
 	}
 	header := encodeHeader(len(values), bitWidth, flags)
@@ -140,10 +136,17 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 		packLanes(dst[payloadStart:payloadEnd], values, bitWidth)
 	}
 
-	// Write exceptions and get actual size
+	// Write exceptions directly, using values[blockSize:] as scratch for high bits
 	actualPatchLen := 0
-	if len(exceptions) > 0 {
-		actualPatchLen = writeExceptions(dst[payloadEnd:], exceptions)
+	if excCount > 0 {
+		// Ensure values has scratch space (cap >= 256)
+		var highBits []uint32
+		if cap(values) >= 2*blockSize {
+			highBits = values[blockSize : blockSize+excCount]
+		} else {
+			highBits = make([]uint32, excCount)
+		}
+		actualPatchLen = writeExceptionsDirect(dst[payloadEnd:], values[:len(values)], bitWidth, highBits)
 	}
 
 	// Trim to actual size
@@ -155,6 +158,10 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 // the supplied dst slice (which will be resized as needed).
 // If the data was delta-encoded (via PackDeltaUint32), it is automatically delta-decoded.
 // Returns an error if the buffer is invalid or corrupted.
+//
+// For zero-allocation operation, provide a dst slice with cap >= 256. The extra capacity
+// (positions 128-255) is used as scratch space for exception handling and will not appear
+// in the returned slice.
 func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 	if len(buf) < headerBytes {
 		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
@@ -172,35 +179,46 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 			ErrInvalidBuffer, minNeeded, len(buf))
 	}
 
-	dst = ensureUint32Len(dst, count)
+	// Handle empty case without allocation
 	if count == 0 {
+		if dst == nil {
+			return nil, nil
+		}
 		return dst[:0], nil
 	}
+
+	// Ensure capacity for both values and scratch space (2*blockSize = 256)
+	dst = ensureUint32Cap(dst, count, 2*blockSize)
 	if bitWidth == 0 {
-		clear(dst)
+		clear(dst[:count])
 	} else {
 		unpackLanes(dst[:count], buf[headerBytes:minNeeded], count, bitWidth)
 	}
 
-	// Handle exceptions (StreamVByte format)
+	// Handle exceptions (StreamVByte format), using dst[blockSize:] as scratch
 	if hasExceptions {
-		if err := applyExceptions(dst, buf, minNeeded, count, bitWidth); err != nil {
+		scratch := dst[blockSize : 2*blockSize]
+		if err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
 		}
 	}
 
 	// Apply delta decoding if the data was delta-encoded
 	if hasDelta && count > 0 {
-		deltaDecode(dst, dst, hasZigZag)
+		deltaDecode(dst[:count], dst[:count], hasZigZag)
 	}
 
-	return dst, nil
+	return dst[:count], nil
 }
 
 // PackDeltaUint32 delta-encodes values in-place prior to calling PackUint32.
 // WARNING: This function mutates the values slice. If you need to preserve
 // the original values, make a copy before calling PackDeltaUint32.
 // The delta flag is set in the header so UnpackUint32 can auto-detect and decode.
+//
+// For zero-allocation operation when data contains exceptions, provide a values
+// slice with cap >= 256. The extra capacity (positions 128-255) is used as scratch
+// space for exception handling.
 func PackDeltaUint32(dst []byte, values []uint32) []byte {
 	validateBlockLength(len(values))
 	var useZigZag bool
@@ -225,12 +243,14 @@ func validateBlockLength(n int) {
 	}
 }
 
-// ensureUint32Len ensures the destination slice has at least n uint32 elements.
-func ensureUint32Len(dst []uint32, n int) []uint32 {
-	if cap(dst) >= n {
+// ensureUint32Cap ensures the destination slice has at least minCap capacity
+// and returns it with length n. For zero-allocation operation, pass a slice
+// with cap >= 2*blockSize (256) to provide scratch space for exception handling.
+func ensureUint32Cap(dst []uint32, n, minCap int) []uint32 {
+	if cap(dst) >= minCap {
 		return dst[:n]
 	}
-	return make([]uint32, n)
+	return make([]uint32, n, minCap)
 }
 
 // requiredBitWidthScalar returns the minimum number of bits needed to encode every
@@ -409,7 +429,7 @@ func unpackLaneInterleaved(dst []uint32, payload []byte, lane, bitWidth, count i
 // lengths once, deriving the exception counts for each candidate width from
 // that histogram, and only materializing the exception list for the winning
 // width.
-func selectBitWidth(values []uint32) (width int, exceptions []exception) {
+func selectBitWidth(values []uint32) (width int, excCount int) {
 
 	/*
 	   void getBestBFromData(const IntType *in, uint8_t &bestb, uint8_t &bestcexcept,
@@ -478,62 +498,49 @@ func selectBitWidth(values []uint32) (width int, exceptions []exception) {
 		}
 	}
 
-	if bestWidth == maxWidth {
-		return bestWidth, nil
-	}
-	buf := make([]exception, 0, bestExcCount)
-	return bestWidth, collectExceptions(values, bestWidth, buf)
+	return bestWidth, bestExcCount
 }
 
-// collectExceptions builds the exception list for the provided bit width using
-// the caller-supplied buffer to avoid per-candidate allocations.
-func collectExceptions(values []uint32, bitWidth int, buf []exception) []exception {
+// collectExceptionsDirect writes exception positions to dst and high bits to highBits.
+// Returns the number of exceptions collected.
+func collectExceptionsDirect(values []uint32, bitWidth int, dst []byte, highBits []uint32) int {
 	if bitWidth >= 32 {
-		return buf[:0]
+		return 0
 	}
-	out := buf[:0]
+	excIdx := 0
 	for i, v := range values {
 		if bits.Len32(v) > bitWidth {
-			out = append(out, exception{
-				index: uint8(i),
-				high:  v >> bitWidth,
-			})
+			dst[excIdx] = byte(i)
+			highBits[excIdx] = v >> bitWidth
+			excIdx++
 		}
 	}
-	return out
+	return excIdx
 }
 
-// writeExceptions serializes the exception count, their positions, and the high
-// bits into dst using StreamVByte encoding for the high bits. Returns the actual
-// number of bytes written.
+// writeExceptionsDirect serializes exception positions and high bits directly.
+// It collects exceptions from values into dst (positions) and highBits buffer,
+// then encodes the high bits with StreamVByte.
+// Returns the actual number of bytes written.
 // Layout:
 //
 //	dst[0]        : exception count (<= 128)
 //	dst[1:n+1]    : byte indices (lane order) of the exceptions
 //	dst[n+1:n+3]  : uint16 length of StreamVByte data (little-endian)
 //	dst[n+3:]     : StreamVByte-encoded high bits
-func writeExceptions(dst []byte, exceptions []exception) int {
-	if len(exceptions) == 0 {
+func writeExceptionsDirect(dst []byte, values []uint32, bitWidth int, highBits []uint32) int {
+	// Collect exception positions to dst[1:] and high bits to highBits
+	excCount := collectExceptionsDirect(values, bitWidth, dst[1:], highBits)
+	if excCount == 0 {
 		return 0
 	}
 
-	// Number of exceptions in the block
-	dst[0] = byte(len(exceptions))
-	pos := 1
-	for _, ex := range exceptions {
-		// Index of the exception in the block (always <= 127)
-		dst[pos] = byte(ex.index)
-		pos++
-	}
-
-	// Collect high bits for StreamVByte encoding
-	highBits := make([]uint32, len(exceptions))
-	for i, ex := range exceptions {
-		highBits[i] = ex.high
-	}
+	// Write exception count
+	dst[0] = byte(excCount)
+	pos := 1 + excCount
 
 	// Encode high bits with StreamVByte
-	svbData := streamvbyte.EncodeUint32(highBits, &streamvbyte.EncodeOptions[uint32]{
+	svbData := streamvbyte.EncodeUint32(highBits[:excCount], &streamvbyte.EncodeOptions[uint32]{
 		Buffer: dst[pos+2:], // Leave space for length prefix
 	})
 
@@ -546,9 +553,10 @@ func writeExceptions(dst []byte, exceptions []exception) int {
 
 // applyExceptions reads exception data from buf at the given offset and applies
 // them to dst by reinserting the high parts that were spilled into the exception table.
+// The scratch slice is used for StreamVByte decoding to avoid allocations.
 // Returns an error if the buffer is malformed.
 // Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
-func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int) error {
+func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scratch []uint32) error {
 	if len(buf) < offset+1 {
 		return fmt.Errorf("fastpfor: missing exception count byte at offset %d", offset)
 	}
@@ -575,8 +583,10 @@ func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int) erro
 		return fmt.Errorf("fastpfor: truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch))
 	}
 
-	// Decode high bits from StreamVByte and apply to dst
-	highBits := streamvbyte.DecodeUint32(patch[:svbLen], excCount, nil)
+	// Decode high bits from StreamVByte into scratch buffer (avoids allocation)
+	highBits := streamvbyte.DecodeUint32(patch[:svbLen], excCount, &streamvbyte.DecodeOptions[uint32]{
+		Buffer: scratch[:excCount],
+	})
 	for i, idx := range positions {
 		if int(idx) >= count {
 			return fmt.Errorf("fastpfor: exception index %d out of range (max %d)", int(idx), count-1)
