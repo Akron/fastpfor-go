@@ -41,7 +41,10 @@ func main() {
     fmt.Printf("Compressed %d integers into %d bytes\n", len(values), len(encoded))
 
     // Decompress
-    decoded := fastpfor.UnpackUint32(nil, encoded)
+    decoded, err := fastpfor.UnpackUint32(nil, encoded)
+    if err != nil {
+        panic(err)
+    }
     fmt.Println("Decoded:", decoded)
 }
 ```
@@ -56,7 +59,7 @@ timestamps := []uint32{1000, 1005, 1012, 1018, 1025, 1033, 1040, 1048}
 encoded := fastpfor.PackDeltaUint32(nil, timestamps)
 
 // Decompress - UnpackUint32 auto-detects delta encoding from the header
-decoded := fastpfor.UnpackUint32(nil, encoded)
+decoded, _ := fastpfor.UnpackUint32(nil, encoded)
 ```
 
 **Note:** `PackDeltaUint32` performs delta encoding in-place, mutating the input slice.
@@ -76,9 +79,63 @@ for _, block := range blocks {
     // Copy block to working buffer (PackDeltaUint32 mutates its input)
     copy(workBuf, block)
     encoded := fastpfor.PackDeltaUint32(encodeBuf[:0], workBuf[:len(block)])
-    decoded := fastpfor.UnpackDeltaUint32(decodeBuf[:0], encoded)
+    decoded, _ := fastpfor.UnpackUint32(decodeBuf[:0], encoded)
     // Process decoded...
 }
+```
+
+## Reader Types
+
+The package provides two reader types for random access to compressed blocks:
+
+### Reader
+
+`Reader` decodes all values upfront for fast random access. Best for repeated access patterns.
+
+```go
+reader := fastpfor.NewReader()
+if err := reader.Load(compressed); err != nil {
+    return err
+}
+
+// Random access by position
+val, err := reader.Get(5)
+
+// Sequential iteration
+for val, pos, ok := reader.Next(); ok; val, pos, ok = reader.Next() {
+    fmt.Printf("pos=%d, val=%d\n", pos, val)
+}
+
+// Binary search for sorted data (delta-encoded without zigzag)
+if reader.IsSorted() {
+    val, pos, ok := reader.SkipTo(1000) // Find first value >= 1000
+}
+
+// Get all values at once
+values := reader.Decode(nil)
+```
+
+### SlimReader
+
+`SlimReader` decodes on-the-fly with minimal memory overhead per instance.
+Ideal for MMAP'd data with millions of readers.
+
+```go
+reader := fastpfor.NewSlimReader()
+if err := reader.Load(mmappedData); err != nil {
+    return err
+}
+
+// Same API as Reader
+val, err := reader.Get(5)
+
+// Sequential iteration (O(1) per call even for delta data)
+for val, pos, ok := reader.Next(); ok; val, pos, ok = reader.Next() {
+    process(val)
+}
+
+// Decode all values when needed
+values := reader.Decode(nil)
 ```
 
 ## Serialization format
