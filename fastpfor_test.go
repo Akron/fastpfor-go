@@ -125,7 +125,8 @@ func TestPackBitWidthCoverage(t *testing.T) {
 			assert.Equal(width, bitWidth, "header stored wrong bit width")
 			assert.Equal(headerBytes+payloadBytes(width), len(encoded), "payload size mismatch")
 
-			decoded := UnpackUint32(dst[:0], encoded)
+			decoded, err := UnpackUint32(dst[:0], encoded)
+			assert.NoError(err)
 			if len(decoded) > 0 {
 				assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array")
 			}
@@ -152,7 +153,8 @@ func TestPackBitWidthExamples(t *testing.T) {
 		_, bitWidth, hasExceptions, _, _ := decodeHeader(header)
 		assert.Equal(2, bitWidth, "width 2 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 2")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 2")
 		assert.Equal(src, decoded, "width 2 round trip mismatch")
 	}
@@ -170,7 +172,8 @@ func TestPackBitWidthExamples(t *testing.T) {
 		_, bitWidth, hasExceptions, _, _ := decodeHeader(header)
 		assert.Equal(5, bitWidth, "width 5 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 5")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 5")
 		assert.Equal(src, decoded, "width 5 round trip mismatch")
 	}
@@ -187,7 +190,8 @@ func TestPackBitWidthExamples(t *testing.T) {
 		_, bitWidth, hasExceptions, _, _ := decodeHeader(header)
 		assert.Equal(13, bitWidth, "width 13 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 13")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 13")
 		assert.Equal(src, decoded, "width 13 round trip mismatch")
 	}
@@ -204,7 +208,8 @@ func TestPackBitWidthExamples(t *testing.T) {
 		_, bitWidth, hasExceptions, _, _ := decodeHeader(header)
 		assert.Equal(24, bitWidth, "width 24 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 24")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 24")
 		assert.Equal(src, decoded, "width 24 round trip mismatch")
 	}
@@ -225,7 +230,8 @@ func TestPackBitWidthExamples(t *testing.T) {
 		_, bitWidth, hasExceptions, _, _ := decodeHeader(header)
 		assert.Equal(32, bitWidth, "width 32 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 32")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 32")
 		assert.Equal(src, decoded, "width 32 round trip mismatch")
 	}
@@ -284,7 +290,8 @@ func TestUnpackUint32AutoDeltaDecode(t *testing.T) {
 	assert.True(hasDelta, "delta flag should be set")
 
 	// UnpackUint32 should auto-detect and decode delta
-	result := UnpackUint32(nil, buf)
+	result, err := UnpackUint32(nil, buf)
+	assert.NoError(err)
 	assert.Equal(monotonic, result, "UnpackUint32 should auto-decode delta-encoded data")
 
 	// Test with non-monotonic data (with zigzag)
@@ -299,7 +306,8 @@ func TestUnpackUint32AutoDeltaDecode(t *testing.T) {
 	assert.True(hasZigZag2, "zigzag flag should be set for non-monotonic data")
 
 	// UnpackUint32 should auto-detect and decode delta+zigzag
-	result2 := UnpackUint32(nil, buf2)
+	result2, err := UnpackUint32(nil, buf2)
+	assert.NoError(err)
 	assert.Equal(nonMonotonic, result2, "UnpackUint32 should auto-decode delta+zigzag data")
 }
 
@@ -331,7 +339,8 @@ func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 	assert.True(hasDelta, "expected delta flag to be set")
 	assert.True(hasZigZag, "expected zigzag flag for negative deltas")
 
-	got := UnpackUint32(nil, buf)
+	got, err := UnpackUint32(nil, buf)
+	assert.NoError(err)
 	assert.Equal(original, got, "zigzag delta round-trip mismatch")
 	// Even though this block only stores 9 logical values, the lane layout would still
 	// serialize a full 4×32 payload if bitWidth > 0. It's therefore cheaper to set the
@@ -370,7 +379,8 @@ func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 	assert.True(hasExceptions, "expected exceptions due to large zigzagged delta")
 	assert.Equal(3, getExceptionCount(buf))
 	assert.Equal(2, getBitWidth(buf))
-	got := UnpackUint32(nil, buf)
+	got, err := UnpackUint32(nil, buf)
+	assert.NoError(err)
 	assert.Equal(original, got, "zigzag delta with exceptions round-trip mismatch")
 }
 
@@ -414,7 +424,8 @@ func TestPackBitWidthExceptionExamples(t *testing.T) {
 		assert.Equal(5, bitWidth, "width 5 exception header mismatch")
 		assert.True(hasExceptions, "expected exceptions for width 5 case")
 		assert.Equal(2, getExceptionCount(encoded), "width 5 exception count mismatch")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 5 exceptions")
 		assert.Equal(src, decoded, "width 5 exceptions round trip mismatch")
 	}
@@ -435,7 +446,8 @@ func TestPackBitWidthExceptionExamples(t *testing.T) {
 		assert.Equal(13, bitWidth, "width 13 exception header mismatch")
 		assert.True(hasExceptions, "expected exceptions for width 13 case")
 		assert.Equal(3, getExceptionCount(encoded), "width 13 exception count mismatch")
-		decoded := UnpackUint32(dst[:0], encoded)
+		decoded, err := UnpackUint32(dst[:0], encoded)
+		assert.NoError(err)
 		assert.Equal(&dst[0], &decoded[0], "expected UnpackUint32 to reuse dst backing array for width 13 exceptions")
 		assert.Equal(src, decoded, "width 13 exceptions round trip mismatch")
 	}
@@ -462,7 +474,8 @@ func TestPackWritesExceptionMetadata(t *testing.T) {
 	excCount := int(buf[headerBytes+payload])
 	assert.Equal(2, excCount, "expected 2 exceptions")
 	// Verify we can decode the buffer correctly
-	decoded := UnpackUint32(nil, buf)
+	decoded, err := UnpackUint32(nil, buf)
+	assert.NoError(err)
 	assert.Equal(data, decoded, "round trip mismatch with exceptions")
 }
 
@@ -482,7 +495,8 @@ func TestPackAppendsInPlace(t *testing.T) {
 	buf := PackUint32(prefix, values)
 	assert.Equal(&prefix[0], &buf[0], "expected PackUint32 to reuse dst capacity")
 	assert.Equal(prefix, buf[:len(prefix)], "prefix corrupted")
-	decoded := UnpackUint32(nil, buf[len(prefix):])
+	decoded, err := UnpackUint32(nil, buf[len(prefix):])
+	assert.NoError(err)
 	assert.Equal(values, decoded, "round trip mismatch for appended block")
 	// Verify the block is well-formed (size depends on optimal width + exception encoding)
 	header := binary.LittleEndian.Uint32(buf[len(prefix) : len(prefix)+headerBytes])
@@ -501,7 +515,8 @@ func TestUnpackReusesDst(t *testing.T) {
 	input := []uint32{5, 6, 7, 8}
 	buf := PackUint32(nil, input)
 	dst := make([]uint32, blockSize)
-	out := UnpackUint32(dst[:0], buf)
+	out, err := UnpackUint32(dst[:0], buf)
+	assert.NoError(err)
 	assert.Equal(len(input), len(out), "length mismatch")
 	if len(out) > 0 {
 		assert.Equal(&dst[0], &out[0], "expected UnpackUint32 to reuse dst backing array")
@@ -511,13 +526,11 @@ func TestUnpackReusesDst(t *testing.T) {
 
 // TestUnpackRejectsShortBuffer guards against truncated buffers.
 func TestUnpackRejectsShortBuffer(t *testing.T) {
-	assert := assert.New(t)
-	assert.Panics(func() {
-		header := encodeHeader(4, 5, 0)
-		buf := make([]byte, headerBytes)
-		binary.LittleEndian.PutUint32(buf, header)
-		UnpackUint32(nil, buf)
-	})
+	header := encodeHeader(4, 5, 0)
+	buf := make([]byte, headerBytes)
+	binary.LittleEndian.PutUint32(buf, header)
+	_, err := UnpackUint32(nil, buf)
+	assert.ErrorIs(t, err, ErrInvalidBuffer)
 }
 
 // -----------------------------------------------------------------------------
@@ -920,7 +933,8 @@ func TestUnpackDeltaZigZagRegression(t *testing.T) {
 			}
 
 			// UnpackDelta uses deltaDecode(dst, dst, useZigZag)
-			result := UnpackUint32(nil, buf)
+			result, err := UnpackUint32(nil, buf)
+			assert.NoError(err)
 			assert.Equal(original, result, "UnpackDelta zigzag round-trip failed")
 		})
 	}
@@ -962,7 +976,8 @@ func TestDeltaDecodeInPlaceAliasing(t *testing.T) {
 			}
 
 			// UnpackDelta uses deltaDecode(dst, dst, useZigZag)
-			result := UnpackUint32(nil, buf)
+			result, err := UnpackUint32(nil, buf)
+			assert.NoError(err)
 			assert.Equal(original, result, "zigzag delta round-trip failed for size %d", size)
 		})
 	}
@@ -1252,7 +1267,7 @@ func BenchmarkUnpackUint32(b *testing.B) {
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
-		dst = UnpackUint32(dst[:0], buf)
+		dst, _ = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
 }
@@ -1275,7 +1290,7 @@ func BenchmarkUnpackDeltaUint32(b *testing.B) {
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
-		dst = UnpackUint32(dst[:0], buf)
+		dst, _ = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
 }
@@ -1298,7 +1313,7 @@ func BenchmarkUnpackDeltaMixed(b *testing.B) {
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
-		dst = UnpackUint32(dst[:0], buf)
+		dst, _ = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
 }
@@ -1320,7 +1335,7 @@ func BenchmarkUnpackWithExceptions(b *testing.B) {
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
-		dst = UnpackUint32(dst[:0], buf)
+		dst, _ = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
 }
@@ -1342,7 +1357,7 @@ func BenchmarkUnpackWithLargeExceptions(b *testing.B) {
 	dst := make([]uint32, 0, blockSize)
 	b.ReportAllocs()
 	for range b.N {
-		dst = UnpackUint32(dst[:0], buf)
+		dst, _ = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
 }
@@ -1500,7 +1515,8 @@ func getExceptionCount(buf []byte) int {
 func assertRoundTrip(t *testing.T, src []uint32) []byte {
 	t.Helper()
 	buf := PackUint32(nil, src)
-	got := UnpackUint32(nil, buf)
+	got, err := UnpackUint32(nil, buf)
+	assert.NoError(t, err)
 	assert.Equal(t, len(src), len(got), "length mismatch")
 	assert.Equal(t, src, got)
 	return buf
@@ -1512,7 +1528,8 @@ func assertDeltaRoundTrip(t *testing.T, src []uint32) []byte {
 	// Copy src since PackDelta mutates its input
 	data := slices.Clone(src)
 	buf := PackDeltaUint32(nil, data)
-	got := UnpackUint32(nil, buf)
+	got, err := UnpackUint32(nil, buf)
+	assert.NoError(t, err)
 	assert.Equal(t, len(src), len(got), "length mismatch")
 	assert.Equal(t, src, got)
 	return buf

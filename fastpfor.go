@@ -154,22 +154,27 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 // UnpackUint32 decodes a PackUint32-produced buffer back into uint32 values, writing into
 // the supplied dst slice (which will be resized as needed).
 // If the data was delta-encoded (via PackDeltaUint32), it is automatically delta-decoded.
-func UnpackUint32(dst []uint32, buf []byte) []uint32 {
+// Returns an error if the buffer is invalid or corrupted.
+func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 	if len(buf) < headerBytes {
-		panic(fmt.Sprintf("fastpfor: UnpackUint32 buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
+		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
+			ErrInvalidBuffer, headerBytes, len(buf))
 	}
 	count, bitWidth, hasExceptions, hasDelta, hasZigZag := decodeHeader(bo.Uint32(buf[:headerBytes]))
-	validateBlockLength(count)
+	if count < 0 || count > blockSize {
+		return nil, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
+	}
 
 	payloadLen := payloadBytes(bitWidth)
 	minNeeded := headerBytes + payloadLen
 	if len(buf) < minNeeded {
-		panic(fmt.Sprintf("fastpfor: buffer truncated: need %d bytes, have %d", minNeeded, len(buf)))
+		return nil, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
+			ErrInvalidBuffer, minNeeded, len(buf))
 	}
 
 	dst = ensureUint32Len(dst, count)
 	if count == 0 {
-		return dst[:0]
+		return dst[:0], nil
 	}
 	if bitWidth == 0 {
 		clear(dst)
@@ -180,7 +185,7 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 	// Handle exceptions (StreamVByte format)
 	if hasExceptions {
 		if err := applyExceptions(dst, buf, minNeeded, count, bitWidth); err != nil {
-			panic(err)
+			return nil, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
 		}
 	}
 
@@ -189,7 +194,7 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 		deltaDecode(dst, dst, hasZigZag)
 	}
 
-	return dst
+	return dst, nil
 }
 
 // PackDeltaUint32 delta-encodes values in-place prior to calling PackUint32.
@@ -208,15 +213,6 @@ func PackDeltaUint32(dst []byte, values []uint32) []byte {
 	}
 	return packInternal(dst, values, flags)
 }
-
-// UnpackDeltaUint32 reverses PackDeltaUint32.
-// Deprecated: Use UnpackUint32 instead, which auto-detects delta encoding from the header.
-// This function is kept for backward compatibility.
-/*s
-func UnpackDeltaUint32(dst []uint32, buf []byte) []uint32 {
-	return UnpackUint32(dst, buf)
-}
-*/
 
 // validateBlockLength panics if the caller tries to encode more than BlockSize
 // integers. FastPFOR always operates on fixed 128-value chunks.

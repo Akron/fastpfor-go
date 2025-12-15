@@ -489,8 +489,8 @@ func BenchmarkSlimReaderDecode(b *testing.B) {
 	}
 }
 
-// BenchmarkloadSlimReader benchmarks SlimReader creation.
-func BenchmarkloadSlimReader(b *testing.B) {
+// BenchmarkLoadSlimReader benchmarks SlimReader creation.
+func BenchmarkLoadSlimReader(b *testing.B) {
 	values := make([]uint32, 128)
 	for i := range values {
 		values[i] = uint32(i * 100)

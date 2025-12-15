@@ -44,67 +44,26 @@ func NewReader() *Reader {
 // This resets all internal state and can be called multiple times to reuse the reader.
 // The buffer must contain a valid single block (packed with PackUint32 or PackDeltaUint32).
 func (r *Reader) Load(buf []byte) error {
+	// Quick header check for isSorted flag before unpacking
 	if len(buf) < headerBytes {
 		return fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
-
 	header := bo.Uint32(buf[:headerBytes])
-	count, bitWidth, hasExceptions, hasDelta, hasZigZag := decodeHeader(header)
+	count, _, _, hasDelta, hasZigZag := decodeHeader(header)
 
-	if count < 0 || count > blockSize {
-		return fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
+	// Unpack using the standard function (reuses r.values buffer)
+	values, err := UnpackUint32(r.values, buf)
+	if err != nil {
+		return err
 	}
 
-	payloadLen := payloadBytes(bitWidth)
-	minNeeded := headerBytes + payloadLen
-
-	if len(buf) < minNeeded {
-		return fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
-			ErrInvalidBuffer, minNeeded, len(buf))
-	}
-
-	// Reset state
+	// Update state
+	r.values = values
 	r.count = count
 	r.isSorted = hasDelta && !hasZigZag // Delta without zigzag implies sorted/monotonic
 	r.pos = 0
 	r.loaded = true
-
-	if count == 0 {
-		if r.values == nil {
-			r.values = make([]uint32, 0)
-		} else {
-			r.values = r.values[:0]
-		}
-		return nil
-	}
-
-	// Decode all values upfront for efficient random access
-	// Block size is at most 128, so this is always fast
-	if cap(r.values) < count {
-		r.values = make([]uint32, count)
-	} else {
-		r.values = r.values[:count]
-	}
-
-	if bitWidth == 0 {
-		// All values are zero
-		clear(r.values)
-	} else {
-		unpackLanes(r.values, buf[headerBytes:minNeeded], count, bitWidth)
-	}
-
-	// Apply exceptions if present
-	if hasExceptions {
-		if err := applyExceptions(r.values, buf, minNeeded, count, bitWidth); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
-		}
-	}
-
-	// Apply delta decoding if needed
-	if hasDelta && count > 0 {
-		deltaDecode(r.values, r.values, hasZigZag)
-	}
 
 	return nil
 }
