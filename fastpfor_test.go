@@ -1033,7 +1033,7 @@ func TestStreamVByteMaxCompressionBenefit(t *testing.T) {
 		src[i] = uint32(i%4 + 1) // Values 1-4, all fit in 3 bits
 	}
 	// Add outliers that force exceptions
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		src[i*12] = uint32(8 + i) // 4-bit values, will be exceptions with 3-bit width
 	}
 
@@ -1429,7 +1429,7 @@ func genDataWithSmallExceptions() []uint32 {
 		out[i] = uint32(i % 256) // 8-bit base values
 	}
 	// Add ~10 exceptions with small high bits
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		out[i*12] = 256 + uint32(i*10) // 9-10 bit values, high bits are small
 	}
 	return out
@@ -1443,7 +1443,7 @@ func genDataWithLargeExceptions() []uint32 {
 		out[i] = 0 // Base values all zero
 	}
 	// Add ~20 exceptions with large high bits (30-32 bit values)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		out[i*6] = mathMaxUint32 - uint32(i*1000) // Large 32-bit values
 	}
 	return out

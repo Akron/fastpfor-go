@@ -5,12 +5,22 @@
 
 package fastpfor
 
-// svbControlBlockSize computes the total data bytes for a StreamVByte control byte.
+// svbControlBlockSizeLUT is a precomputed lookup table for StreamVByte control byte sizes.
 // Each control byte encodes lengths for 4 values (2 bits each, code+1 = byte length).
+// Entry i = sum of byte lengths for all 4 values encoded in control byte i.
+var svbControlBlockSizeLUT [256]uint8
+
+func init() {
+	for ctrl := range 256 {
+		// Sum of (code+1) for all 4 values
+		size := (ctrl & 0x03) + ((ctrl >> 2) & 0x03) + ((ctrl >> 4) & 0x03) + (ctrl >> 6) + 4
+		svbControlBlockSizeLUT[ctrl] = uint8(size)
+	}
+}
+
+// svbControlBlockSize returns the total data bytes for a StreamVByte control byte.
 func svbControlBlockSize(ctrl byte) int {
-	// Sum of (code+1) for all 4 values
-	// Each 2-bit code: 0=1byte, 1=2bytes, 2=3bytes, 3=4bytes
-	return int((ctrl & 0x03) + ((ctrl >> 2) & 0x03) + ((ctrl >> 4) & 0x03) + (ctrl >> 6) + 4)
+	return int(svbControlBlockSizeLUT[ctrl])
 }
 
 // svbDecodeOne decodes a single value from StreamVByte data at the given index.
