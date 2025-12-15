@@ -282,6 +282,153 @@ func TestSvbDecodeOneVsReference(t *testing.T) {
 	}
 }
 
+// TestStreamVByteByteCompatibility verifies byte-level compatibility between
+// our custom decoder and the SIMD-enhanced streamvbyte library.
+func TestStreamVByteByteCompatibility(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("format_structure", func(t *testing.T) {
+		// Test that the format is: [control bytes][data bytes]
+		// Control bytes: ceil(count/4) bytes, each encoding lengths for 4 values
+		// Each 2-bit code: 0=1byte, 1=2bytes, 2=3bytes, 3=4bytes
+
+		values := []uint32{1, 256, 65536, 16777216} // 1-byte, 2-byte, 3-byte, 4-byte
+		encoded := streamvbyte.EncodeUint32(values, nil)
+
+		// Should have 1 control byte + 1+2+3+4 = 10 data bytes = 11 total
+		assert.Equal(11, len(encoded), "expected 11 bytes for 4 values of varying sizes")
+
+		// Verify control byte: codes should be 0, 1, 2, 3
+		// Packed as: (0 << 0) | (1 << 2) | (2 << 4) | (3 << 6) = 0b11100100 = 0xE4
+		assert.Equal(byte(0xE4), encoded[0], "control byte mismatch")
+
+		// Verify each value can be decoded correctly
+		for i, want := range values {
+			got := svbDecodeOne(encoded, len(values), i)
+			assert.Equal(want, got, "value mismatch at index %d", i)
+		}
+	})
+
+	t.Run("boundary_values", func(t *testing.T) {
+		// Test values at encoding boundaries
+		boundaryValues := []uint32{
+			0,          // min 1-byte
+			255,        // max 1-byte
+			256,        // min 2-byte
+			65535,      // max 2-byte
+			65536,      // min 3-byte
+			16777215,   // max 3-byte
+			16777216,   // min 4-byte
+			4294967295, // max 4-byte (uint32 max)
+		}
+
+		encoded := streamvbyte.EncodeUint32(boundaryValues, nil)
+		reference := streamvbyte.DecodeUint32(encoded, len(boundaryValues), nil)
+
+		for i, want := range boundaryValues {
+			got := svbDecodeOne(encoded, len(boundaryValues), i)
+			assert.Equal(want, got, "boundary value mismatch at index %d (value %d)", i, want)
+			assert.Equal(reference[i], got, "decoder mismatch with library at index %d", i)
+		}
+	})
+
+	t.Run("partial_blocks", func(t *testing.T) {
+		// Test counts that don't fill complete 4-value blocks
+		for count := 1; count <= 17; count++ {
+			values := make([]uint32, count)
+			for i := range values {
+				values[i] = uint32(i * 1000)
+			}
+
+			encoded := streamvbyte.EncodeUint32(values, nil)
+			reference := streamvbyte.DecodeUint32(encoded, count, nil)
+
+			// Verify control byte count matches expectation
+			expectedControlBytes := (count + 3) / 4
+			assert.GreaterOrEqual(len(encoded), expectedControlBytes, "encoded too short for count %d", count)
+
+			for i := 0; i < count; i++ {
+				got := svbDecodeOne(encoded, count, i)
+				assert.Equal(reference[i], got, "count=%d, index=%d", count, i)
+			}
+		}
+	})
+
+	t.Run("all_same_size", func(t *testing.T) {
+		// Test blocks where all values have the same byte length
+		testCases := []struct {
+			name   string
+			values []uint32
+		}{
+			{"all_1byte", []uint32{0, 1, 127, 255, 100, 200, 50, 150}},
+			{"all_2byte", []uint32{256, 1000, 10000, 65535, 300, 500, 700, 900}},
+			{"all_3byte", []uint32{65536, 100000, 1000000, 16777215, 70000, 80000, 90000, 200000}},
+			{"all_4byte", []uint32{16777216, 100000000, 1000000000, 4294967295, 20000000, 30000000, 40000000, 50000000}},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				encoded := streamvbyte.EncodeUint32(tc.values, nil)
+				reference := streamvbyte.DecodeUint32(encoded, len(tc.values), nil)
+
+				for i, want := range tc.values {
+					got := svbDecodeOne(encoded, len(tc.values), i)
+					assert.Equal(want, got, "value mismatch at index %d", i)
+					assert.Equal(reference[i], got, "decoder mismatch with library at index %d", i)
+				}
+			})
+		}
+	})
+
+	t.Run("exception_like_values", func(t *testing.T) {
+		// Test values similar to what exceptions produce (high bits shifted out)
+		// These are typically small values (the high bits of original values)
+		exceptionHighBits := []uint32{
+			0, 1, 2, 3, 4, 5, 6, 7, // Very small (1-byte)
+			10, 100, 255, // Still 1-byte
+			256, 1000, 65535, // 2-byte
+			65536, 1000000, // 3-byte
+			16777216, 100000000, // 4-byte
+		}
+
+		encoded := streamvbyte.EncodeUint32(exceptionHighBits, nil)
+		reference := streamvbyte.DecodeUint32(encoded, len(exceptionHighBits), nil)
+
+		for i, want := range exceptionHighBits {
+			got := svbDecodeOne(encoded, len(exceptionHighBits), i)
+			assert.Equal(want, got, "exception high bit mismatch at index %d (value %d)", i, want)
+			assert.Equal(reference[i], got, "decoder mismatch with library at index %d", i)
+		}
+	})
+
+	t.Run("max_exceptions_count", func(t *testing.T) {
+		// Test with 128 values (max exception count in FastPFOR)
+		values := make([]uint32, 128)
+		for i := range values {
+			// Mix of different sizes
+			switch i % 4 {
+			case 0:
+				values[i] = uint32(i) // 1-byte
+			case 1:
+				values[i] = uint32(i * 256) // 2-byte
+			case 2:
+				values[i] = uint32(i * 65536) // 3-byte
+			case 3:
+				values[i] = uint32(i * 16777216) // 4-byte (when i > 0)
+			}
+		}
+
+		encoded := streamvbyte.EncodeUint32(values, nil)
+		reference := streamvbyte.DecodeUint32(encoded, len(values), nil)
+
+		for i, want := range values {
+			got := svbDecodeOne(encoded, len(values), i)
+			assert.Equal(want, got, "max count mismatch at index %d", i)
+			assert.Equal(reference[i], got, "decoder mismatch with library at index %d", i)
+		}
+	})
+}
+
 // BenchmarkSvbDecodeOne benchmarks single-value decoding.
 func BenchmarkSvbDecodeOne(b *testing.B) {
 	values := make([]uint32, 64)
