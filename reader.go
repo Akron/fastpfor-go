@@ -212,16 +212,20 @@ func (r *Reader) skipToLinear(req uint32) (value uint32, pos uint8, ok bool) {
 	return 0, 0, false
 }
 
-// All returns a copy of all decoded values.
-// Modifications to the returned slice do not affect the reader.
+// Decode copies all decoded values into the provided destination slice.
+// If dst has insufficient capacity, a new slice is allocated.
 // Returns nil if the reader is not loaded.
-func (r *Reader) All() []uint32 {
+func (r *Reader) Decode(dst []uint32) []uint32 {
 	if !r.loaded {
 		return nil
 	}
-	result := make([]uint32, r.count)
-	copy(result, r.values)
-	return result
+	if cap(dst) < r.count {
+		dst = make([]uint32, r.count)
+	} else {
+		dst = dst[:r.count]
+	}
+	copy(dst, r.values)
+	return dst
 }
 
 // IsSorted returns whether the data is known to be sorted (monotonically increasing).
@@ -229,4 +233,3 @@ func (r *Reader) All() []uint32 {
 func (r *Reader) IsSorted() bool {
 	return r.isSorted
 }
-

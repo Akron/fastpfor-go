@@ -401,8 +401,8 @@ func TestReaderSkipToProgression(t *testing.T) {
 	}
 }
 
-// TestReaderAll tests the All() method.
-func TestReaderAll(t *testing.T) {
+// TestReaderDecode tests the Decode() method.
+func TestReaderDecode(t *testing.T) {
 	assert := assert.New(t)
 
 	values := []uint32{1, 2, 3, 4, 5}
@@ -411,17 +411,17 @@ func TestReaderAll(t *testing.T) {
 	reader, err := loadReader(packed)
 	assert.NoError(err)
 
-	all := reader.All()
-	assert.Equal(len(values), len(all))
+	decoded := reader.Decode(nil)
+	assert.Equal(len(values), len(decoded))
 
 	for i, want := range values {
-		assert.Equal(want, all[i], "All()[%d]", i)
+		assert.Equal(want, decoded[i], "Decode()[%d]", i)
 	}
 
 	// Verify it's a copy (modifying doesn't affect reader)
-	all[0] = 999
+	decoded[0] = 999
 	val, _ := reader.Get(0)
-	assert.NotEqual(uint32(999), val, "All() should return a copy, not the internal slice")
+	assert.NotEqual(uint32(999), val, "Decode() should return a copy, not the internal slice")
 }
 
 // TestLoadReaderInvalidBuffer tests error handling for invalid buffers.
@@ -621,8 +621,8 @@ func TestReaderNotLoaded(t *testing.T) {
 	_, _, ok = reader.SkipTo(0)
 	assert.False(ok)
 
-	// All should return nil
-	assert.Nil(reader.All())
+	// Decode should return nil
+	assert.Nil(reader.Decode(nil))
 }
 
 // TestReaderLoad tests the Load method.
@@ -752,7 +752,7 @@ func BenchmarkReaderSkipTo(b *testing.B) {
 	}
 }
 
-func BenchmarkReaderAll(b *testing.B) {
+func BenchmarkReaderDecode(b *testing.B) {
 	values := make([]uint32, 128)
 	for i := range values {
 		values[i] = uint32(i * 100)
@@ -764,7 +764,7 @@ func BenchmarkReaderAll(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		_ = reader.All()
+		_ = reader.Decode(nil)
 	}
 }
 
