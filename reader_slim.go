@@ -50,7 +50,7 @@ func (r *SlimReader) Load(buf []byte) error {
 	}
 
 	header := bo.Uint32(buf[:headerBytes])
-	count, bitWidth, hasExceptions, hasDelta, hasZigZag := decodeHeader(header)
+	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag := decodeHeader(header)
 
 	if count < 0 || count > blockSize {
 		return fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)

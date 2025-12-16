@@ -50,7 +50,7 @@ func (r *Reader) Load(buf []byte) error {
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
 	header := bo.Uint32(buf[:headerBytes])
-	count, _, _, hasDelta, hasZigZag := decodeHeader(header)
+	count, _, _, _, hasDelta, hasZigZag := decodeHeader(header)
 
 	// Unpack using the standard function (reuses r.values buffer)
 	values, err := UnpackUint32(r.values, buf)

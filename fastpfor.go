@@ -33,17 +33,35 @@ const (
 	//
 	// The 32-bit header is structured as follows (little-endian):
 	//
-	//	Bits  0-7:  element count (0–128)
-	//	Bits  8-13: bit width for packed values (0–32)
-	//	Bit   29:   delta flag (1 = values are delta-encoded)
-	//	Bit   30:   zigzag flag (1 = deltas are zigzag-encoded)
-	//	Bit   31:   exception flag (1 = patch table follows payload)
+	//	Bits  0-7:   element count (0–128)
+	//	Bits  8-13:  bit width for packed values (0–32)
+	//	Bits 14-15:  integer type (00=uint8, 01=uint16, 10=uint32, 11=uint64)
+	//	Bit  29:     delta flag (1 = values are delta-encoded)
+	//	Bit  30:     zigzag flag (1 = deltas are zigzag-encoded)
+	//	Bit  31:     exception flag (1 = patch table follows payload)
 	headerBytes      = 4 // Size of the header in bytes
 	headerCountBits  = 8 // Bits reserved for element count
 	headerWidthBits  = 6 // Bits reserved for bit width
 	headerCountMask  = (1 << headerCountBits) - 1
 	headerWidthMask  = (1 << headerWidthBits) - 1
 	headerWidthShift = headerCountBits
+
+	// Integer type encoding (bits 14-15)
+	headerTypeBits  = 2
+	headerTypeMask  = (1 << headerTypeBits) - 1
+	headerTypeShift = headerWidthShift + headerWidthBits // bits 14-15
+
+	// Integer type values (for decoding)
+	IntTypeUint8  = 0 // 00 - reserved for future use
+	IntTypeUint16 = 1 // 01 - uint16 values
+	IntTypeUint32 = 2 // 10 - uint32 values (default/current)
+	IntTypeUint64 = 3 // 11 - reserved for future use
+
+	// Integer type flags (for encoding via extraFlags parameter)
+	headerTypeUint8Flag  = uint32(IntTypeUint8) << headerTypeShift  // 0x0000 - reserved
+	headerTypeUint16Flag = uint32(IntTypeUint16) << headerTypeShift // 0x4000
+	headerTypeUint32Flag = uint32(IntTypeUint32) << headerTypeShift // 0x8000 - default
+	headerTypeUint64Flag = uint32(IntTypeUint64) << headerTypeShift // 0xC000 - reserved
 
 	// Flag bits in the upper portion of the header
 	headerDeltaFlag     = uint32(1 << 29)
@@ -105,12 +123,15 @@ func MaxBlockSizeUint32() int {
 // slice with cap >= 256. The extra capacity (positions 128-255) is used as scratch
 // space for exception handling.
 func PackUint32(dst []byte, values []uint32) []byte {
-	return packInternal(dst, values, 0)
+	return packInternal(dst, values, headerTypeUint32Flag)
 }
 
 // packInternal is called by higher codecs. It validates the block length,
 // selects the bit width, and packs the payload. It also appends the exception
 // table if there are any exceptions.
+//
+// The extraFlags parameter can include integer type flags (headerTypeUint16Flag, etc.)
+// as well as delta/zigzag flags. If no type flag is set, IntTypeUint32 is used.
 func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 	validateBlockLength(len(values))
 	// Select the bit width that minimizes the serialized size.
@@ -167,7 +188,7 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
-	count, bitWidth, hasExceptions, hasDelta, hasZigZag := decodeHeader(bo.Uint32(buf[:headerBytes]))
+	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	if count < 0 || count > blockSize {
 		return nil, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
 	}
@@ -225,7 +246,7 @@ func PackDeltaUint32(dst []byte, values []uint32) []byte {
 	if len(values) > 0 {
 		useZigZag = deltaEncode(values, values) // in-place
 	}
-	flags := headerDeltaFlag // Always set delta flag
+	flags := headerTypeUint32Flag | headerDeltaFlag // Always set type and delta flags
 	if useZigZag {
 		flags |= headerZigZagFlag
 	}
@@ -292,16 +313,18 @@ func patchBytesExact(exceptionCount, svbLen int) int {
 */
 
 // encodeHeader encodes the header for a block. It combines the count, bit width, and flags.
+// The flags parameter should include the integer type (headerTypeUint16Flag, etc.).
 func encodeHeader(count, bitWidth int, flags uint32) uint32 {
 	return uint32(count&headerCountMask) |
 		(uint32(bitWidth&headerWidthMask) << headerWidthShift) |
 		flags
 }
 
-// decodeHeader decodes the header for a block. It extracts the count, bit width, and flags.
-func decodeHeader(header uint32) (count int, bitWidth int, hasExceptions bool, hasDelta bool, hasZigZag bool) {
+// decodeHeader decodes the header for a block. It extracts count, bit width, integer type, and flags.
+func decodeHeader(header uint32) (count, bitWidth, intType int, hasExceptions, hasDelta, hasZigZag bool) {
 	count = int(header & headerCountMask)
 	bitWidth = int((header >> headerWidthShift) & headerWidthMask)
+	intType = int((header >> headerTypeShift) & headerTypeMask)
 	hasExceptions = header&headerExceptionFlag != 0
 	hasDelta = header&headerDeltaFlag != 0
 	hasZigZag = header&headerZigZagFlag != 0
