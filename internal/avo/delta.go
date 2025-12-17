@@ -19,7 +19,7 @@ import (
 // suggested by [1]. Other forms such as DM or D4
 // would trade compression ratio for fewer data dependencies, but D1 keeps the
 // deltas small for integer codecs like FastPFOR. The decoder follows the
-// “shift-and-add” SIMD prefix-sum tree: repeated byte shifts (PSLLDQ)
+// "shift-and-add" SIMD prefix-sum tree: repeated byte shifts (PSLLDQ)
 // and packed additions (PADDL)
 // compute inclusive scans four integers at a time.
 //
@@ -253,8 +253,6 @@ func genDeltaDecodeKernel() {
 
 	vecLoop := "delta_decode_vec_loop"
 	vecDone := "delta_decode_vec_done"
-
-	// Unrolled loop
 	unrollLoop := "delta_decode_unroll_loop"
 	unrollDone := "delta_decode_unroll_done"
 
@@ -349,7 +347,6 @@ func genDeltaDecodeKernel() {
 
 	tailLoop := "delta_decode_tail_loop"
 	tailDone := "delta_decode_tail_done"
-
 	tailDelta := GP32()
 
 	Label(tailLoop)
@@ -367,5 +364,336 @@ func genDeltaDecodeKernel() {
 	JMP(op.LabelRef(tailLoop))
 
 	Label(tailDone)
+	RET()
+}
+
+func genDeltaDecodeWithOverflowKernel() {
+	TEXT("deltaDecodeWithOverflowSIMDAsm", NOSPLIT, "func(dst *uint32, src *uint32, n int) uint8")
+	Doc("deltaDecodeWithOverflowSIMDAsm decodes deltas using prefix sum with integrated SIMD overflow detection.")
+	Doc("Returns the 0-based index of the first overflow, or 0 if no overflow occurred.")
+	Doc("")
+	Doc("Overflow detection is done DURING the SIMD decode loop by checking if output[i] < output[i-1].")
+	Doc("For unsigned comparison in SSE2 (which only has signed compare), we use the XOR trick:")
+	Doc("  (a < b) unsigned  ≡  ((a XOR 0x80000000) < (b XOR 0x80000000)) signed")
+
+	// Load parameters
+	dstParam := Load(Param("dst"), GP64())
+	dstBase := dstParam.(reg.GPVirtual)
+	srcParam := Load(Param("src"), GP64())
+	srcBase := srcParam.(reg.GPVirtual)
+	nParam := Load(Param("n"), GP64())
+
+	n := GP64()
+	MOVQ(nParam, n)
+
+	vecLimit := GP64()
+	MOVQ(n, vecLimit)
+	ANDQ(op.Imm(0xfffffffc), vecLimit)
+
+	index := GP64()
+	XORQ(index, index)
+
+	prevVec := XMM()
+	PXOR(prevVec, prevVec)
+
+	prevScalar := GP32()
+	XORL(prevScalar, prevScalar)
+
+	// ==================== SIGN BIT CONSTANT FOR UNSIGNED COMPARISON ====================
+	// For unsigned comparison using SSE2's signed PCMPGTD:
+	//   (a < b) unsigned  ≡  ((a XOR 0x80000000) < (b XOR 0x80000000)) signed
+	// This works because XORing with 0x80000000 flips the sign bit, effectively
+	// converting from unsigned to signed range while preserving order.
+	signBit := XMM()
+	PCMPEQL(signBit, signBit)  // All 1s (0xFFFFFFFF in each lane)
+	PSLLL(op.Imm(31), signBit) // Shift left 31 bits → 0x80000000 in each lane
+
+	// Track which block first detected overflow (-1 = none yet)
+	overflowBlockIdx := GP64()
+	minusOne := GP64()
+	XORQ(minusOne, minusOne)
+	NOTQ(minusOne)                   // -1
+	MOVQ(minusOne, overflowBlockIdx) // Initialize to -1
+
+	// Accumulator for overflow detection within current block
+	overflowMask := XMM()
+	PXOR(overflowMask, overflowMask)
+
+	unrollLoop := "delta_decode_ovf_unroll_loop"
+	unrollDone := "delta_decode_ovf_unroll_done"
+	vecLoop := "delta_decode_ovf_vec_loop"
+	vecDone := "delta_decode_ovf_vec_done"
+
+	unrollLimit := GP64()
+	MOVQ(n, unrollLimit)
+	ANDQ(op.Imm(0xfffffff0), unrollLimit)
+
+	// ==================== UNROLLED LOOP WITH OVERFLOW DETECTION ====================
+	Label(unrollLoop)
+	CMPQ(index, unrollLimit)
+	JAE(op.LabelRef(unrollDone))
+
+	var v, t [4]reg.VecVirtual
+	for i := 0; i < 4; i++ {
+		v[i] = XMM()
+		t[i] = XMM()
+	}
+
+	// Load 4 blocks
+	for i := 0; i < 4; i++ {
+		MOVO(op.Mem{Base: srcBase, Index: index, Scale: 4, Disp: i * 16}, v[i])
+	}
+
+	// Kogge-Stone prefix sum - Stage 1
+	for i := 0; i < 4; i++ {
+		MOVO(v[i], t[i])
+		PSLLDQ(op.Imm(4), t[i])
+		PADDL(t[i], v[i])
+	}
+
+	// Kogge-Stone prefix sum - Stage 2
+	for i := 0; i < 4; i++ {
+		MOVO(v[i], t[i])
+		PSLLDQ(op.Imm(8), t[i])
+		PADDL(t[i], v[i])
+	}
+
+	// Process each block with overflow detection
+	for i := 0; i < 4; i++ {
+		// Save prevVec BEFORE adding global prefix (needed for overflow detection)
+		prevBefore := XMM()
+		MOVO(prevVec, prevBefore)
+
+		// Add global prefix and store
+		PADDL(prevVec, v[i])
+		MOVO(v[i], op.Mem{Base: dstBase, Index: index, Scale: 4, Disp: i * 16})
+
+		// ==================== OVERFLOW DETECTION ====================
+		// After prefix sum, check if any output[j] < output[j-1]
+		// This means we need to compare v[i] against shifted version of v[i] with prev inserted
+		//
+		// For v[i] = [v0, v1, v2, v3], we compare against [prev_last, v0, v1, v2]
+		// Overflow at position j means v[j] < prev[j]
+
+		// Create shifted version: [0, v0, v1, v2]
+		shifted := XMM()
+		MOVO(v[i], shifted)
+		PSLLDQ(op.Imm(4), shifted)
+
+		// Insert prev_last at position 0
+		// prevBefore has prev broadcasted, we need just the last element at position 0
+		prevLast := XMM()
+		MOVO(prevBefore, prevLast)
+		PSHUFL(op.Imm(0xFF), prevLast, prevLast) // Broadcast (all lanes = prev_last)
+		// Create mask [0xFFFFFFFF, 0, 0, 0]
+		mask := XMM()
+		PCMPEQL(mask, mask)
+		PSRLDQ(op.Imm(12), mask)
+		PAND(mask, prevLast)   // [prev_last, 0, 0, 0]
+		POR(prevLast, shifted) // [prev_last, v0, v1, v2]
+
+		// Unsigned comparison: check if v[i] < shifted (overflow)
+		// Using: (a < b) ≡ (b > a) ≡ ((b XOR sign) > (a XOR sign)) signed
+		cmpShifted := XMM()
+		MOVO(shifted, cmpShifted)
+		PXOR(signBit, cmpShifted) // shifted XOR 0x80000000
+
+		cmpV := XMM()
+		MOVO(v[i], cmpV)
+		PXOR(signBit, cmpV) // v[i] XOR 0x80000000
+
+		// PCMPGTL: cmpShifted > cmpV means shifted > v[i] means overflow
+		PCMPGTL(cmpV, cmpShifted)
+		POR(cmpShifted, overflowMask) // Accumulate overflow bits
+
+		// Update prevVec for next block
+		MOVO(v[i], prevVec)
+		PSHUFL(op.Imm(0xFF), prevVec, prevVec)
+	}
+
+	// Check if overflow detected in this unrolled block
+	noOverflow := "delta_decode_ovf_unroll_no_overflow"
+	testMask := GP32()
+	MOVMSKPS(overflowMask, testMask)
+	TESTL(testMask, testMask)
+	JZ(op.LabelRef(noOverflow))
+	// Overflow detected - record block index if first time
+	CMPQ(overflowBlockIdx, minusOne)
+	JNE(op.LabelRef(noOverflow))
+	MOVQ(index, overflowBlockIdx)
+	Label(noOverflow)
+	PXOR(overflowMask, overflowMask) // Reset for next iteration
+
+	MOVD(prevVec, prevScalar)
+	ADDQ(op.Imm(16), index)
+	JMP(op.LabelRef(unrollLoop))
+
+	Label(unrollDone)
+
+	// ==================== SINGLE BLOCK LOOP WITH OVERFLOW DETECTION ====================
+	Label(vecLoop)
+	CMPQ(index, vecLimit)
+	JAE(op.LabelRef(vecDone))
+
+	// Save prev before update
+	prevBefore := XMM()
+	MOVO(prevVec, prevBefore)
+
+	// Load and compute prefix sum
+	valVec := XMM()
+	tmpVec := XMM()
+	MOVO(op.Mem{Base: srcBase, Index: index, Scale: 4}, valVec)
+
+	MOVO(valVec, tmpVec)
+	PSLLDQ(op.Imm(4), tmpVec)
+	PADDL(tmpVec, valVec)
+
+	MOVO(valVec, tmpVec)
+	PSLLDQ(op.Imm(8), tmpVec)
+	PADDL(tmpVec, valVec)
+
+	PADDL(prevVec, valVec)
+	MOVO(valVec, op.Mem{Base: dstBase, Index: index, Scale: 4})
+
+	// Overflow detection for this block
+	shifted := XMM()
+	MOVO(valVec, shifted)
+	PSLLDQ(op.Imm(4), shifted)
+	prevLast := XMM()
+	MOVO(prevBefore, prevLast)
+	PSHUFL(op.Imm(0xFF), prevLast, prevLast)
+	mask := XMM()
+	PCMPEQL(mask, mask)
+	PSRLDQ(op.Imm(12), mask)
+	PAND(mask, prevLast)
+	POR(prevLast, shifted)
+
+	cmpShifted := XMM()
+	MOVO(shifted, cmpShifted)
+	PXOR(signBit, cmpShifted)
+	cmpV := XMM()
+	MOVO(valVec, cmpV)
+	PXOR(signBit, cmpV)
+	PCMPGTL(cmpV, cmpShifted)
+	POR(cmpShifted, overflowMask)
+
+	// Check overflow
+	vecNoOverflow := "delta_decode_ovf_vec_no_overflow"
+	testMask2 := GP32()
+	MOVMSKPS(overflowMask, testMask2)
+	TESTL(testMask2, testMask2)
+	JZ(op.LabelRef(vecNoOverflow))
+	CMPQ(overflowBlockIdx, minusOne)
+	JNE(op.LabelRef(vecNoOverflow))
+	MOVQ(index, overflowBlockIdx)
+	Label(vecNoOverflow)
+	PXOR(overflowMask, overflowMask)
+
+	MOVO(valVec, prevVec)
+	PSHUFL(op.Imm(0xFF), prevVec, prevVec)
+	MOVL(op.Mem{Base: dstBase, Index: index, Scale: 4, Disp: 12}, prevScalar)
+
+	ADDQ(op.Imm(4), index)
+	JMP(op.LabelRef(vecLoop))
+
+	Label(vecDone)
+
+	// ==================== TAIL LOOP WITH OVERFLOW DETECTION ====================
+	tailLoop := "delta_decode_ovf_tail_loop"
+	tailDone := "delta_decode_ovf_tail_done"
+	tailNoOverflow := "delta_decode_ovf_tail_no_overflow"
+
+	tailDelta := GP32()
+	tailNext := GP32()
+	tailOverflowPos := GP32()
+	XORL(tailOverflowPos, tailOverflowPos)
+
+	Label(tailLoop)
+	CMPQ(index, n)
+	JAE(op.LabelRef(tailDone))
+
+	MOVL(op.Mem{Base: srcBase, Index: index, Scale: 4}, tailDelta)
+	MOVL(prevScalar, tailNext)
+	ADDL(tailDelta, tailNext)
+
+	// Check overflow: if tailNext < prevScalar, overflow occurred
+	CMPL(tailNext, prevScalar)
+	JAE(op.LabelRef(tailNoOverflow))
+	// Overflow - record position if first
+	TESTL(tailOverflowPos, tailOverflowPos)
+	JNZ(op.LabelRef(tailNoOverflow))
+	MOVL(index.As32(), tailOverflowPos)
+
+	Label(tailNoOverflow)
+	MOVL(tailNext, op.Mem{Base: dstBase, Index: index, Scale: 4})
+	MOVL(tailNext, prevScalar)
+
+	ADDQ(op.Imm(1), index)
+	JMP(op.LabelRef(tailLoop))
+
+	Label(tailDone)
+
+	// ==================== FIND EXACT OVERFLOW POSITION ====================
+	// If SIMD detected overflow, scan from that block to find exact position
+	// Otherwise use tail overflow position
+
+	overflowPos := GP32()
+	XORL(overflowPos, overflowPos)
+
+	noSIMDOverflow := "delta_decode_ovf_no_simd"
+	CMPQ(overflowBlockIdx, minusOne)
+	JE(op.LabelRef(noSIMDOverflow))
+
+	// SIMD overflow detected - scan from overflowBlockIdx
+	scanIdx := GP64()
+	MOVQ(overflowBlockIdx, scanIdx)
+	scanPrev := GP32()
+
+	// Get element before block start
+	TESTQ(scanIdx, scanIdx)
+	JZ(op.LabelRef("delta_decode_ovf_scan_from_zero"))
+	DECQ(scanIdx)
+	MOVL(op.Mem{Base: dstBase, Index: scanIdx, Scale: 4}, scanPrev)
+	INCQ(scanIdx)
+	JMP(op.LabelRef("delta_decode_ovf_scan_start"))
+
+	Label("delta_decode_ovf_scan_from_zero")
+	XORL(scanPrev, scanPrev)
+
+	Label("delta_decode_ovf_scan_start")
+	scanCurr := GP32()
+	scanEnd := GP64()
+	MOVQ(overflowBlockIdx, scanEnd)
+	ADDQ(op.Imm(16), scanEnd)
+	CMPQ(scanEnd, n)
+	JBE(op.LabelRef("delta_decode_ovf_scan_loop"))
+	MOVQ(n, scanEnd)
+
+	Label("delta_decode_ovf_scan_loop")
+	CMPQ(scanIdx, scanEnd)
+	JAE(op.LabelRef("delta_decode_ovf_scan_done"))
+
+	MOVL(op.Mem{Base: dstBase, Index: scanIdx, Scale: 4}, scanCurr)
+	CMPL(scanCurr, scanPrev)
+	JAE(op.LabelRef("delta_decode_ovf_scan_continue"))
+
+	// Found exact position
+	MOVL(scanIdx.As32(), overflowPos)
+	JMP(op.LabelRef("delta_decode_ovf_return"))
+
+	Label("delta_decode_ovf_scan_continue")
+	MOVL(scanCurr, scanPrev)
+	INCQ(scanIdx)
+	JMP(op.LabelRef("delta_decode_ovf_scan_loop"))
+
+	Label("delta_decode_ovf_scan_done")
+	JMP(op.LabelRef("delta_decode_ovf_return"))
+
+	Label(noSIMDOverflow)
+	// Use tail overflow position
+	MOVL(tailOverflowPos, overflowPos)
+
+	Label("delta_decode_ovf_return")
+	Store(overflowPos.As8(), ReturnIndex(0))
 	RET()
 }

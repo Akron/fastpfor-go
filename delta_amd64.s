@@ -214,3 +214,253 @@ delta_decode_tail_loop:
 
 delta_decode_tail_done:
 	RET
+
+// func deltaDecodeWithOverflowSIMDAsm(dst *uint32, src *uint32, n int) uint8
+// Requires: SSE, SSE2
+TEXT ·deltaDecodeWithOverflowSIMDAsm(SB), NOSPLIT, $0-25
+	MOVQ    dst+0(FP), AX
+	MOVQ    src+8(FP), CX
+	MOVQ    n+16(FP), DX
+	MOVQ    DX, BX
+	ANDQ    $0xfffffffc, BX
+	XORQ    SI, SI
+	PXOR    X0, X0
+	XORL    DI, DI
+	PCMPEQL X1, X1
+	PSLLL   $0x1f, X1
+	XORQ    R9, R9
+	NOTQ    R9
+	MOVQ    R9, R8
+	PXOR    X2, X2
+	MOVQ    DX, R10
+	ANDQ    $0xfffffff0, R10
+
+delta_decode_ovf_unroll_loop:
+	CMPQ     SI, R10
+	JAE      delta_decode_ovf_unroll_done
+	MOVO     (CX)(SI*4), X3
+	MOVO     16(CX)(SI*4), X5
+	MOVO     32(CX)(SI*4), X6
+	MOVO     48(CX)(SI*4), X7
+	MOVO     X3, X4
+	PSLLDQ   $0x04, X4
+	PADDL    X4, X3
+	MOVO     X5, X4
+	PSLLDQ   $0x04, X4
+	PADDL    X4, X5
+	MOVO     X6, X4
+	PSLLDQ   $0x04, X4
+	PADDL    X4, X6
+	MOVO     X7, X4
+	PSLLDQ   $0x04, X4
+	PADDL    X4, X7
+	MOVO     X3, X4
+	PSLLDQ   $0x08, X4
+	PADDL    X4, X3
+	MOVO     X5, X4
+	PSLLDQ   $0x08, X4
+	PADDL    X4, X5
+	MOVO     X6, X4
+	PSLLDQ   $0x08, X4
+	PADDL    X4, X6
+	MOVO     X7, X4
+	PSLLDQ   $0x08, X4
+	PADDL    X4, X7
+	MOVO     X0, X4
+	PADDL    X0, X3
+	MOVO     X3, (AX)(SI*4)
+	MOVO     X3, X0
+	PSLLDQ   $0x04, X0
+	MOVO     X4, X4
+	PSHUFL   $0xff, X4, X4
+	PCMPEQL  X8, X8
+	PSRLDQ   $0x0c, X8
+	PAND     X8, X4
+	POR      X4, X0
+	MOVO     X0, X0
+	PXOR     X1, X0
+	MOVO     X3, X4
+	PXOR     X1, X4
+	PCMPGTL  X4, X0
+	POR      X0, X2
+	MOVO     X3, X0
+	PSHUFL   $0xff, X0, X0
+	MOVO     X0, X3
+	PADDL    X0, X5
+	MOVO     X5, 16(AX)(SI*4)
+	MOVO     X5, X0
+	PSLLDQ   $0x04, X0
+	MOVO     X3, X3
+	PSHUFL   $0xff, X3, X3
+	PCMPEQL  X4, X4
+	PSRLDQ   $0x0c, X4
+	PAND     X4, X3
+	POR      X3, X0
+	MOVO     X0, X0
+	PXOR     X1, X0
+	MOVO     X5, X3
+	PXOR     X1, X3
+	PCMPGTL  X3, X0
+	POR      X0, X2
+	MOVO     X5, X0
+	PSHUFL   $0xff, X0, X0
+	MOVO     X0, X3
+	PADDL    X0, X6
+	MOVO     X6, 32(AX)(SI*4)
+	MOVO     X6, X0
+	PSLLDQ   $0x04, X0
+	MOVO     X3, X3
+	PSHUFL   $0xff, X3, X3
+	PCMPEQL  X4, X4
+	PSRLDQ   $0x0c, X4
+	PAND     X4, X3
+	POR      X3, X0
+	MOVO     X0, X0
+	PXOR     X1, X0
+	MOVO     X6, X3
+	PXOR     X1, X3
+	PCMPGTL  X3, X0
+	POR      X0, X2
+	MOVO     X6, X0
+	PSHUFL   $0xff, X0, X0
+	MOVO     X0, X3
+	PADDL    X0, X7
+	MOVO     X7, 48(AX)(SI*4)
+	MOVO     X7, X0
+	PSLLDQ   $0x04, X0
+	MOVO     X3, X3
+	PSHUFL   $0xff, X3, X3
+	PCMPEQL  X4, X4
+	PSRLDQ   $0x0c, X4
+	PAND     X4, X3
+	POR      X3, X0
+	MOVO     X0, X0
+	PXOR     X1, X0
+	MOVO     X7, X3
+	PXOR     X1, X3
+	PCMPGTL  X3, X0
+	POR      X0, X2
+	MOVO     X7, X0
+	PSHUFL   $0xff, X0, X0
+	MOVMSKPS X2, DI
+	TESTL    DI, DI
+	JZ       delta_decode_ovf_unroll_no_overflow
+	CMPQ     R8, R9
+	JNE      delta_decode_ovf_unroll_no_overflow
+	MOVQ     SI, R8
+
+delta_decode_ovf_unroll_no_overflow:
+	PXOR X2, X2
+	MOVD X0, DI
+	ADDQ $0x10, SI
+	JMP  delta_decode_ovf_unroll_loop
+
+delta_decode_ovf_unroll_done:
+delta_decode_ovf_vec_loop:
+	CMPQ     SI, BX
+	JAE      delta_decode_ovf_vec_done
+	MOVO     X0, X3
+	MOVO     (CX)(SI*4), X4
+	MOVO     X4, X5
+	PSLLDQ   $0x04, X5
+	PADDL    X5, X4
+	MOVO     X4, X5
+	PSLLDQ   $0x08, X5
+	PADDL    X5, X4
+	PADDL    X0, X4
+	MOVO     X4, (AX)(SI*4)
+	MOVO     X4, X0
+	PSLLDQ   $0x04, X0
+	MOVO     X3, X3
+	PSHUFL   $0xff, X3, X3
+	PCMPEQL  X5, X5
+	PSRLDQ   $0x0c, X5
+	PAND     X5, X3
+	POR      X3, X0
+	MOVO     X0, X0
+	PXOR     X1, X0
+	MOVO     X4, X3
+	PXOR     X1, X3
+	PCMPGTL  X3, X0
+	POR      X0, X2
+	MOVMSKPS X2, DI
+	TESTL    DI, DI
+	JZ       delta_decode_ovf_vec_no_overflow
+	CMPQ     R8, R9
+	JNE      delta_decode_ovf_vec_no_overflow
+	MOVQ     SI, R8
+
+delta_decode_ovf_vec_no_overflow:
+	PXOR   X2, X2
+	MOVO   X4, X0
+	PSHUFL $0xff, X0, X0
+	MOVL   12(AX)(SI*4), DI
+	ADDQ   $0x04, SI
+	JMP    delta_decode_ovf_vec_loop
+
+delta_decode_ovf_vec_done:
+	XORL R11, R11
+
+delta_decode_ovf_tail_loop:
+	CMPQ  SI, DX
+	JAE   delta_decode_ovf_tail_done
+	MOVL  (CX)(SI*4), BX
+	MOVL  DI, R10
+	ADDL  BX, R10
+	CMPL  R10, DI
+	JAE   delta_decode_ovf_tail_no_overflow
+	TESTL R11, R11
+	JNZ   delta_decode_ovf_tail_no_overflow
+	MOVL  SI, R11
+
+delta_decode_ovf_tail_no_overflow:
+	MOVL R10, (AX)(SI*4)
+	MOVL R10, DI
+	ADDQ $0x01, SI
+	JMP  delta_decode_ovf_tail_loop
+
+delta_decode_ovf_tail_done:
+	XORL  CX, CX
+	CMPQ  R8, R9
+	JE    delta_decode_ovf_no_simd
+	MOVQ  R8, BX
+	TESTQ BX, BX
+	JZ    delta_decode_ovf_scan_from_zero
+	DECQ  BX
+	MOVL  (AX)(BX*4), SI
+	INCQ  BX
+	JMP   delta_decode_ovf_scan_start
+
+delta_decode_ovf_scan_from_zero:
+	XORL SI, SI
+
+delta_decode_ovf_scan_start:
+	MOVQ R8, DI
+	ADDQ $0x10, DI
+	CMPQ DI, DX
+	JBE  delta_decode_ovf_scan_loop
+	MOVQ DX, DI
+
+delta_decode_ovf_scan_loop:
+	CMPQ BX, DI
+	JAE  delta_decode_ovf_scan_done
+	MOVL (AX)(BX*4), DX
+	CMPL DX, SI
+	JAE  delta_decode_ovf_scan_continue
+	MOVL BX, CX
+	JMP  delta_decode_ovf_return
+
+delta_decode_ovf_scan_continue:
+	MOVL DX, SI
+	INCQ BX
+	JMP  delta_decode_ovf_scan_loop
+
+delta_decode_ovf_scan_done:
+	JMP delta_decode_ovf_return
+
+delta_decode_ovf_no_simd:
+	MOVL R11, CX
+
+delta_decode_ovf_return:
+	MOVB CL, ret+24(FP)
+	RET

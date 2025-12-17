@@ -27,6 +27,7 @@ func main() {
 	if comp == "delta" || comp == "all" {
 		genDeltaEncodeKernel()
 		genDeltaDecodeKernel()
+		genDeltaDecodeWithOverflowKernel()
 	}
 
 	if comp == "zigzag" || comp == "all" {
