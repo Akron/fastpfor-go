@@ -49,7 +49,7 @@ func main() {
 }
 ```
 
-For sorted or time-series data, use delta encoding for better compression:
+For sorted data, use delta encoding for better compression:
 
 ```go
 // Monotonically increasing data benefits from delta encoding
@@ -65,21 +65,14 @@ decoded, _ := fastpfor.UnpackUint32(nil, encoded)
 **Note:** `PackDeltaUint32` performs delta encoding in-place, mutating the input slice.
 If you need to preserve the original values, make a copy first.
 
-`UnpackUint32` automatically detects and decodes delta-encoded data based on the header flags.
-
 Reuse buffers to avoid allocations in hot paths:
 
 ```go
-// Pre-allocate buffers with cap >= 256 for zero-allocation operation.
-// The extra capacity (positions 128-255) is used as scratch space for exceptions.
 encodeBuf := make([]byte, 0, fastpfor.MaxBlockSizeUint32())
-decodeBuf := make([]uint32, 0, 256) // cap >= 256 for zero-alloc unpack
-workBuf := make([]uint32, 128, 256) // cap >= 256 for zero-alloc pack
+decodeBuf := make([]uint32, 0, 256)
 
 for _, block := range blocks {
-    // Copy block to working buffer (PackDeltaUint32 mutates its input)
-    copy(workBuf, block)
-    encoded := fastpfor.PackDeltaUint32(encodeBuf[:0], workBuf[:len(block)])
+    encoded := fastpfor.PackUint32(encodeBuf[:0], block)
     decoded, _ := fastpfor.UnpackUint32(decodeBuf[:0], encoded)
     // Process decoded...
 }
@@ -103,7 +96,11 @@ if err := reader.Load(compressed); err != nil {
 val, err := reader.Get(5)
 
 // Sequential iteration
-for val, pos, ok := reader.Next(); ok; val, pos, ok = reader.Next() {
+for {
+    val, pos, ok := reader.Next()
+    if !ok {
+        break
+    }
     fmt.Printf("pos=%d, val=%d\n", pos, val)
 }
 
@@ -126,17 +123,6 @@ reader := fastpfor.NewSlimReader()
 if err := reader.Load(mmappedData); err != nil {
     return err
 }
-
-// Same API as Reader
-val, err := reader.Get(5)
-
-// Sequential iteration (O(1) per call even for delta data)
-for val, pos, ok := reader.Next(); ok; val, pos, ok = reader.Next() {
-    process(val)
-}
-
-// Decode all values when needed
-values := reader.Decode(nil)
 ```
 
 ## Serialization format
