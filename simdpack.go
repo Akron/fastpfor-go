@@ -18,8 +18,8 @@ func initSIMDSelection() {
 		packLanes = packLanesSIMDPreferred
 		unpackLanes = unpackLanesSIMDPreferred
 		deltaEncode = deltaEncodeSIMD
-		// Use SIMD delta decode (copying into aligned temp) for benchmarking comparison.
-		deltaDecode = deltaDecodeSIMD
+		// Auto-select decode strategy based on alignment.
+		deltaDecode = deltaDecodeAuto
 		deltaDecodeWithOverflow = deltaDecodeWithOverflowSIMD
 		simdAvailable = true
 		return
@@ -510,16 +510,60 @@ func deltaDecodeSIMD(dst, deltas []uint32, useZigZag bool) {
 		return
 	}
 
-	// Use aligned temporary buffer for SIMD operations and to avoid mutating the input.
+	srcPtr := &deltas[0]
+	dstPtr := &dst[0]
+	aligned := func(p *uint32) bool {
+		return uintptr(unsafe.Pointer(p))&15 == 0
+	}
+
+	// Fast path: if zigzag isn't requested, decode directly when both pointers are 16-byte aligned.
+	if !useZigZag && aligned(srcPtr) && aligned(dstPtr) {
+		deltaDecodeSIMDAsm(dstPtr, srcPtr, n)
+		return
+	}
+
+	// When zigzag is requested, prefer in-place if the caller allows mutation and alignment is safe.
+	if &dst[0] == &deltas[0] && aligned(dstPtr) {
+		zigzagDecodeSIMDAsm(dstPtr, n)
+		deltaDecodeSIMDAsm(dstPtr, dstPtr, n)
+		return
+	}
+
+	// Otherwise keep the previous behavior: work on an aligned temp to avoid mutating input and to satisfy alignment.
 	var tmpStorage [blockSize + 4]uint32
 	tmp := alignedUint32Slice(&tmpStorage)
 	copy(tmp[:n], deltas)
-
-	if useZigZag {
-		zigzagDecodeSIMDAsm(&tmp[0], n)
-	}
+	zigzagDecodeSIMDAsm(&tmp[0], n)
 	deltaDecodeSIMDAsm(&tmp[0], &tmp[0], n)
 	copy(dst[:n], tmp[:n])
+}
+
+// deltaDecodeAuto picks the fastest available strategy based on alignment.
+// SIMD is only used when both src and dst are 16-byte aligned; otherwise scalar
+// avoids the extra aligned copy overhead that the SIMD path would incur.
+func deltaDecodeAuto(dst, deltas []uint32, useZigZag bool) {
+	n := len(deltas)
+	if n == 0 {
+		return
+	}
+	if n > blockSize || !simdAvailable {
+		deltaDecodeScalar(dst, deltas, useZigZag)
+		return
+	}
+
+	srcPtr := &deltas[0]
+	dstPtr := &dst[0]
+	aligned := func(p *uint32) bool {
+		return uintptr(unsafe.Pointer(p))&15 == 0
+	}
+
+	if aligned(srcPtr) && aligned(dstPtr) {
+		deltaDecodeSIMD(dst, deltas, useZigZag)
+		return
+	}
+
+	// Unaligned: scalar is faster than copying to an aligned temp for SIMD.
+	deltaDecodeScalar(dst, deltas, useZigZag)
 }
 
 // deltaDecodeWithOverflowSIMD decodes deltas using SIMD and detects overflow.

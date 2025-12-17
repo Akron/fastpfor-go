@@ -122,6 +122,7 @@ for _, block := range blocks {
 }
 ```
 
+
 ## Reader Types
 
 The package provides two reader types for random access to compressed blocks:
@@ -256,6 +257,10 @@ so using `-tags=noasm` disables SIMD in both libraries simultaneously. This is u
 ## Benchmarking
 - `go test -bench=. -benchmem -benchtime=10x`
 - `go test -bench=. -benchmem -benchtime=10x -tags=noasm`
+
+## Disclaimer
+
+This library was developed with AI assistance (Claude Sonnet 4.5, Gemini 3, GPT 5.1 Codex).
 
 ## Copyright
 
