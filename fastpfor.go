@@ -10,12 +10,32 @@ package fastpfor
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/bits"
 	"slices"
 
 	"github.com/mhr3/streamvbyte"
 )
+
+// ErrOverflow is returned when delta decoding overflows uint32.
+// The Position field contains the index of the first overflow.
+// Use errors.As to extract the position:
+//
+//	var overflow *ErrOverflow
+//	if errors.As(err, &overflow) {
+//	    fmt.Printf("overflow at index %d\n", overflow.Position)
+//	}
+type ErrOverflow struct {
+	Position uint8
+}
+
+func (e *ErrOverflow) Error() string {
+	return fmt.Sprintf("fastpfor: delta decode overflow at index %d", e.Position)
+}
+
+// ErrInvalidFlags is returned when the header contains an invalid flag combination.
+var ErrInvalidFlags = errors.New("fastpfor: invalid header flags")
 
 // Block configuration constants. PackUint32/UnpackUint32 always operates on at most 128
 // integers, interleaved into 4 lanes to match the SIMD-PFOR layout.
@@ -36,6 +56,8 @@ const (
 	//	Bits  0-7:   element count (0–128)
 	//	Bits  8-13:  bit width for packed values (0–32)
 	//	Bits 14-15:  integer type (00=uint8, 01=uint16, 10=uint32, 11=uint64)
+	//	Bits 16-27:  reserved (must be 0)
+	//	Bit  28:     will-overflow flag (1 = delta decode WILL overflow uint32)
 	//	Bit  29:     delta flag (1 = values are delta-encoded)
 	//	Bit  30:     zigzag flag (1 = deltas are zigzag-encoded)
 	//	Bit  31:     exception flag (1 = patch table follows payload)
@@ -63,10 +85,11 @@ const (
 	headerTypeUint32Flag = uint32(IntTypeUint32) << headerTypeShift // 0x8000 - default
 	headerTypeUint64Flag = uint32(IntTypeUint64) << headerTypeShift // 0xC000 - reserved
 
-	// Flag bits in the upper portion of the header
-	headerDeltaFlag     = uint32(1 << 29)
-	headerZigZagFlag    = uint32(1 << 30)
-	headerExceptionFlag = uint32(1 << 31)
+	// Flag bits in the header
+	headerWillOverflowFlag = uint32(1 << 28) // delta decode WILL overflow uint32 (checked at pack time)
+	headerDeltaFlag        = uint32(1 << 29)
+	headerZigZagFlag       = uint32(1 << 30)
+	headerExceptionFlag    = uint32(1 << 31)
 
 	// mathMaxUint32 is the maximum uint32, used while constructing bit masks without conversions.
 	mathMaxUint32 = ^uint32(0)
@@ -89,6 +112,7 @@ var unpackLanes func(dst []uint32, payload []byte, count, bitWidth int) = unpack
 
 var deltaEncode func(dst, src []uint32) bool = deltaEncodeScalar
 var deltaDecode func(dst, deltas []uint32, useZigZag bool) = deltaDecodeScalar
+var deltaDecodeWithOverflow func(dst, deltas []uint32, useZigZag bool) uint8 = deltaDecodeWithOverflowScalar
 
 var (
 	simdAvailable bool
@@ -177,8 +201,17 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 
 // UnpackUint32 decodes a PackUint32-produced buffer back into uint32 values, writing into
 // the supplied dst slice (which will be resized as needed).
-// If the data was delta-encoded (via PackDeltaUint32), it is automatically delta-decoded.
-// Returns an error if the buffer is invalid or corrupted.
+// If the data was delta-encoded (via PackDeltaUint32 or PackAlreadyDeltaUint32), it is automatically delta-decoded.
+//
+// Returns an error if the buffer is invalid. For blocks packed with PackAlreadyDeltaUint32
+// where overflow occurs during delta decoding, returns *ErrOverflow containing the
+// position of the first overflow. Use errors.As to check for overflow:
+//
+//	decoded, err := UnpackUint32(nil, buf)
+//	var overflow *ErrOverflow
+//	if errors.As(err, &overflow) {
+//	    // Handle overflow at overflow.Position
+//	}
 //
 // For zero-allocation operation, provide a dst slice with cap >= 256. The extra capacity
 // (positions 128-255) is used as scratch space for exception handling and will not appear
@@ -188,9 +221,15 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
-	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag := decodeHeader(bo.Uint32(buf[:headerBytes]))
+	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag, willOverflow := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	if count < 0 || count > blockSize {
 		return nil, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
+	}
+
+	// Validate flag combination: willOverflow requires non-zigzag delta encoding
+	// (zigzag uses int64 accumulator internally, so uint32 overflow doesn't apply)
+	if willOverflow && hasZigZag {
+		return nil, fmt.Errorf("%w: will-overflow flag cannot be combined with zigzag encoding", ErrInvalidFlags)
 	}
 
 	payloadLen := payloadBytes(bitWidth)
@@ -226,6 +265,15 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 
 	// Apply delta decoding if the data was delta-encoded
 	if hasDelta && count > 0 {
+		if willOverflow {
+			// Overflow-detecting path for PackAlreadyDeltaUint32 blocks
+			overflowPos := deltaDecodeWithOverflow(dst[:count], dst[:count], hasZigZag)
+			if overflowPos > 0 {
+				return dst[:count], &ErrOverflow{Position: overflowPos}
+			}
+			return dst[:count], nil
+		}
+		// Fast path for PackDeltaUint32 blocks (no overflow possible)
 		deltaDecode(dst[:count], dst[:count], hasZigZag)
 	}
 
@@ -251,6 +299,38 @@ func PackDeltaUint32(dst []byte, values []uint32) []byte {
 		flags |= headerZigZagFlag
 	}
 	return packInternal(dst, values, flags)
+}
+
+// PackAlreadyDeltaUint32 packs pre-computed delta values (does NOT compute deltas itself).
+// Use this when you have externally-computed deltas that may cause overflow during
+// prefix-sum decoding (e.g., deltas computed from uint64 values).
+//
+// For zero-allocation operation when data contains exceptions, provide a deltas
+// slice with cap >= 256. The extra capacity (positions 128-255) is used as scratch
+// space for exception handling.
+func PackAlreadyDeltaUint32(dst []byte, deltas []uint32) []byte {
+	validateBlockLength(len(deltas))
+	// Set delta flag (so decoder applies prefix sum)
+	// Only set overflow flag if prefix-sum would actually overflow
+	flags := headerTypeUint32Flag | headerDeltaFlag
+	if deltasWillOverflow(deltas) {
+		flags |= headerWillOverflowFlag
+	}
+	return packInternal(dst, deltas, flags)
+}
+
+// deltasWillOverflow checks if computing prefix sums of the deltas would overflow uint32.
+// This is O(n) but very fast - just additions and comparisons.
+func deltasWillOverflow(deltas []uint32) bool {
+	var prev uint32
+	for _, d := range deltas {
+		next := prev + d
+		if next < prev { // overflow detected
+			return true
+		}
+		prev = next
+	}
+	return false
 }
 
 // validateBlockLength panics if the caller tries to encode more than BlockSize
@@ -301,17 +381,6 @@ func patchBytesMax(exceptionCount int) int {
 	return 1 + exceptionCount + 2 + streamvbyte.MaxEncodedLen(exceptionCount)
 }
 
-// patchBytesExact returns the exact byte count for a given exception table with
-// the StreamVByte-encoded high bits already computed.
-/*
-func patchBytesExact(exceptionCount, svbLen int) int {
-	if exceptionCount == 0 {
-		return 0
-	}
-	return 1 + exceptionCount + 2 + svbLen
-}
-*/
-
 // encodeHeader encodes the header for a block. It combines the count, bit width, and flags.
 // The flags parameter should include the integer type (headerTypeUint16Flag, etc.).
 func encodeHeader(count, bitWidth int, flags uint32) uint32 {
@@ -321,13 +390,14 @@ func encodeHeader(count, bitWidth int, flags uint32) uint32 {
 }
 
 // decodeHeader decodes the header for a block. It extracts count, bit width, integer type, and flags.
-func decodeHeader(header uint32) (count, bitWidth, intType int, hasExceptions, hasDelta, hasZigZag bool) {
+func decodeHeader(header uint32) (count, bitWidth, intType int, hasExceptions, hasDelta, hasZigZag, willOverflow bool) {
 	count = int(header & headerCountMask)
 	bitWidth = int((header >> headerWidthShift) & headerWidthMask)
 	intType = int((header >> headerTypeShift) & headerTypeMask)
 	hasExceptions = header&headerExceptionFlag != 0
 	hasDelta = header&headerDeltaFlag != 0
 	hasZigZag = header&headerZigZagFlag != 0
+	willOverflow = header&headerWillOverflowFlag != 0
 	return
 }
 
@@ -676,6 +746,37 @@ func deltaDecodeScalar(dst, deltas []uint32, useZigZag bool) {
 		prev += d
 		dst[i] = prev
 	}
+}
+
+// deltaDecodeWithOverflowScalar reconstructs prefix sums with overflow detection.
+// Returns the 1-based position of the first overflow, or 0 if no overflow occurred.
+// Position 0 cannot overflow (it's just copying the first delta), so 0 is a clean sentinel.
+// For zigzag mode, uses int64 accumulator internally so uint32 overflow is not possible
+// in the same way - we return 0 (overflow detection doesn't apply to zigzag).
+func deltaDecodeWithOverflowScalar(dst, deltas []uint32, useZigZag bool) uint8 {
+	if useZigZag {
+		// Zigzag uses int64 accumulator, no uint32 overflow in the traditional sense
+		var prev int64
+		for i, d := range deltas {
+			prev += int64(zigzagDecode32(d))
+			dst[i] = uint32(prev)
+		}
+		return 0
+	}
+
+	var prev uint32
+	var overflowPos uint8
+	for i, d := range deltas {
+		next := prev + d
+		// Detect unsigned overflow: if result < operand, overflow occurred
+		// Note: i > 0 because overflow cannot occur at index 0 (first value is just copied)
+		if overflowPos == 0 && next < prev {
+			overflowPos = uint8(i) // 0-based index (always >= 1 when overflow occurs)
+		}
+		dst[i] = next
+		prev = next
+	}
+	return overflowPos
 }
 
 // zigzagEncode32 encodes a 32-bit integer as a zigzag integer.

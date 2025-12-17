@@ -19,6 +19,7 @@ func initSIMDSelection() {
 		unpackLanes = unpackLanesSIMDPreferred
 		deltaEncode = deltaEncodeSIMD
 		deltaDecode = deltaDecodeSIMD
+		deltaDecodeWithOverflow = deltaDecodeWithOverflowSIMD
 		simdAvailable = true
 		return
 	}
@@ -515,4 +516,49 @@ func deltaDecodeSIMD(dst, deltas []uint32, useZigZag bool) {
 	}
 	deltaDecodeSIMDAsm(&tmp[0], &tmp[0], n)
 	copy(dst[:n], tmp[:n])
+}
+
+// deltaDecodeWithOverflowSIMD decodes deltas using SIMD and detects overflow.
+// Returns the 1-based position of the first overflow, or 0 if no overflow occurred.
+// Uses SIMD for the decode, then scans to find the first overflow position.
+func deltaDecodeWithOverflowSIMD(dst, deltas []uint32, useZigZag bool) uint8 {
+	n := len(deltas)
+	if n == 0 {
+		return 0
+	}
+	if n > blockSize {
+		// Fall back to scalar for oversized input
+		return deltaDecodeWithOverflowScalar(dst, deltas, useZigZag)
+	}
+
+	// For zigzag, overflow detection doesn't apply in the same way (uses int64 internally)
+	if useZigZag {
+		deltaDecodeSIMD(dst, deltas, useZigZag)
+		return 0
+	}
+
+	// Keep a copy of original deltas for overflow detection (since dst and deltas may be same slice)
+	var deltaCopy [blockSize]uint32
+	copy(deltaCopy[:n], deltas)
+
+	// Use aligned temporary buffer for SIMD operations
+	var tmpStorage [blockSize + 4]uint32
+	tmp := alignedUint32Slice(&tmpStorage)
+	copy(tmp[:n], deltas)
+
+	// Use SIMD for the actual decode
+	deltaDecodeSIMDAsm(&tmp[0], &tmp[0], n)
+	copy(dst[:n], tmp[:n])
+
+	// Scan for first overflow using the original deltas
+	// Note: overflow cannot occur at index 0 (first value is just copied)
+	var prev uint32
+	for i := range n {
+		expected := prev + deltaCopy[i]
+		if expected < prev {
+			return uint8(i) // 0-based index (always >= 1 when overflow occurs)
+		}
+		prev = expected
+	}
+	return 0
 }

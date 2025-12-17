@@ -3,6 +3,7 @@ package fastpfor
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -41,7 +42,7 @@ func TestEncodeDecodeHeader(t *testing.T) {
 	header := encodeHeader(count, bitWidth, flags)
 
 	// Decode and verify
-	gotCount, gotBitWidth, gotIntType, hasExc, hasDelta, hasZigZag := decodeHeader(header)
+	gotCount, gotBitWidth, gotIntType, hasExc, hasDelta, hasZigZag, willOverflow := decodeHeader(header)
 
 	assert.Equal(count, gotCount, "count mismatch")
 	assert.Equal(bitWidth, gotBitWidth, "bitWidth mismatch")
@@ -49,6 +50,7 @@ func TestEncodeDecodeHeader(t *testing.T) {
 	assert.False(hasExc, "expected no exception flag")
 	assert.True(hasDelta, "expected delta flag")
 	assert.True(hasZigZag, "expected zigzag flag")
+	assert.False(willOverflow, "expected no will-overflow flag")
 }
 
 // TestPackUint32HasCorrectIntType verifies PackUint32 uses IntTypeUint32 in header.
@@ -160,7 +162,7 @@ func TestPackBitWidthCoverage(t *testing.T) {
 			}
 
 			header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-			_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+			_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 
 			assert.False(hasExceptions, "unexpected exceptions for width %d", width)
 			assert.Equal(width, bitWidth, "header stored wrong bit width")
@@ -191,7 +193,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 2")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(2, bitWidth, "width 2 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 2")
 		decoded, err := UnpackUint32(dst[:0], encoded)
@@ -210,7 +212,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 5")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(5, bitWidth, "width 5 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 5")
 		decoded, err := UnpackUint32(dst[:0], encoded)
@@ -228,7 +230,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 13")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(13, bitWidth, "width 13 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 13")
 		decoded, err := UnpackUint32(dst[:0], encoded)
@@ -246,7 +248,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 24")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(24, bitWidth, "width 24 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 24")
 		decoded, err := UnpackUint32(dst[:0], encoded)
@@ -268,7 +270,7 @@ func TestPackBitWidthExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 32")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(32, bitWidth, "width 32 header mismatch")
 		assert.False(hasExceptions, "unexpected exceptions for width 32")
 		decoded, err := UnpackUint32(dst[:0], encoded)
@@ -327,7 +329,7 @@ func TestUnpackUint32AutoDeltaDecode(t *testing.T) {
 
 	// Verify delta flag is set
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	_, _, _, _, hasDelta, _ := decodeHeader(header)
+	_, _, _, _, hasDelta, _, _ := decodeHeader(header)
 	assert.True(hasDelta, "delta flag should be set")
 
 	// UnpackUint32 should auto-detect and decode delta
@@ -342,7 +344,7 @@ func TestUnpackUint32AutoDeltaDecode(t *testing.T) {
 
 	// Verify both flags are set
 	header2 := binary.LittleEndian.Uint32(buf2[:headerBytes])
-	_, _, _, _, hasDelta2, hasZigZag2 := decodeHeader(header2)
+	_, _, _, _, hasDelta2, hasZigZag2, _ := decodeHeader(header2)
 	assert.True(hasDelta2, "delta flag should be set")
 	assert.True(hasZigZag2, "zigzag flag should be set for non-monotonic data")
 
@@ -358,7 +360,7 @@ func TestPackDeltaMonotonicDoesNotSetZigZag(t *testing.T) {
 	src := slices.Clone(genMonotonic(32))
 	buf := PackDeltaUint32(nil, src)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	_, _, _, _, hasDelta, hasZigZag := decodeHeader(header)
+	_, _, _, _, hasDelta, hasZigZag, _ := decodeHeader(header)
 	assert.True(hasDelta, "delta flag should be set")
 	assert.False(hasZigZag, "monotonic data should not require zigzag encoding")
 	assert.Equal(0, getExceptionCount(buf))
@@ -376,7 +378,7 @@ func TestPackUnpackDeltaZigZagHeader(t *testing.T) {
 	src := slices.Clone(original)
 	buf := PackDeltaUint32(nil, src)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	_, _, _, _, hasDelta, hasZigZag := decodeHeader(header)
+	_, _, _, _, hasDelta, hasZigZag, _ := decodeHeader(header)
 	assert.True(hasDelta, "expected delta flag to be set")
 	assert.True(hasZigZag, "expected zigzag flag for negative deltas")
 
@@ -414,7 +416,7 @@ func TestPackUnpackDeltaZigZagWithExceptions(t *testing.T) {
 	src := slices.Clone(original)
 	buf := PackDeltaUint32(nil, src)
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	_, _, _, hasExceptions, hasDelta, hasZigZag := decodeHeader(header)
+	_, _, _, hasExceptions, hasDelta, hasZigZag, _ := decodeHeader(header)
 	assert.True(hasDelta, "expected delta flag to be set")
 	assert.True(hasZigZag, "expected zigzag flag when negative delta present")
 	assert.True(hasExceptions, "expected exceptions due to large zigzagged delta")
@@ -461,7 +463,7 @@ func TestPackBitWidthExceptionExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 5 exceptions")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(5, bitWidth, "width 5 exception header mismatch")
 		assert.True(hasExceptions, "expected exceptions for width 5 case")
 		assert.Equal(2, getExceptionCount(encoded), "width 5 exception count mismatch")
@@ -483,7 +485,7 @@ func TestPackBitWidthExceptionExamples(t *testing.T) {
 		encoded := PackUint32(buf[:0], src)
 		assert.Equal(&buf[:cap(buf)][0], &encoded[0], "expected PackUint32 to reuse dst backing array for width 13 exceptions")
 		header := binary.LittleEndian.Uint32(encoded[:headerBytes])
-		_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 		assert.Equal(13, bitWidth, "width 13 exception header mismatch")
 		assert.True(hasExceptions, "expected exceptions for width 13 case")
 		assert.Equal(3, getExceptionCount(encoded), "width 13 exception count mismatch")
@@ -541,7 +543,7 @@ func TestPackAppendsInPlace(t *testing.T) {
 	assert.Equal(values, decoded, "round trip mismatch for appended block")
 	// Verify the block is well-formed (size depends on optimal width + exception encoding)
 	header := binary.LittleEndian.Uint32(buf[len(prefix) : len(prefix)+headerBytes])
-	count, width, _, hasExc, _, _ := decodeHeader(header)
+	count, width, _, hasExc, _, _, _ := decodeHeader(header)
 	assert.Equal(len(values), count, "header count mismatch")
 	assert.LessOrEqual(width, 32, "bit width should be at most 32")
 	// The actual size depends on whether exceptions are used and StreamVByte encoding
@@ -971,7 +973,7 @@ func TestUnpackDeltaZigZagRegression(t *testing.T) {
 
 			// Verify zigzag flag is set (confirms we're testing the right path)
 			header := binary.LittleEndian.Uint32(buf[:headerBytes])
-			_, _, _, _, _, hasZigZag := decodeHeader(header)
+			_, _, _, _, _, hasZigZag, _ := decodeHeader(header)
 			if !hasZigZag {
 				t.Skip("test case doesn't trigger zigzag encoding")
 			}
@@ -1014,7 +1016,7 @@ func TestDeltaDecodeInPlaceAliasing(t *testing.T) {
 
 			// Verify zigzag flag is set
 			header := binary.LittleEndian.Uint32(buf[:headerBytes])
-			_, _, _, _, _, hasZigZag := decodeHeader(header)
+			_, _, _, _, _, hasZigZag, _ := decodeHeader(header)
 			if !hasZigZag {
 				t.Skip("couldn't create data that triggers zigzag")
 			}
@@ -1025,6 +1027,309 @@ func TestDeltaDecodeInPlaceAliasing(t *testing.T) {
 			assert.Equal(original, result, "zigzag delta round-trip failed for size %d", size)
 		})
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Overflow handling tests
+// -----------------------------------------------------------------------------
+
+// TestPackAlreadyDeltaUint32SetsOverflowFlagOnlyWhenNeeded verifies PackAlreadyDeltaUint32 only sets
+// the will-overflow flag when the deltas would actually overflow during decode.
+func TestPackAlreadyDeltaUint32SetsOverflowFlagOnlyWhenNeeded(t *testing.T) {
+	assert := assert.New(t)
+
+	// Case 1: Small deltas that won't overflow - flag should NOT be set
+	smallDeltas := []uint32{100, 5, 7, 3, 10, 8}
+	buf1 := PackAlreadyDeltaUint32(nil, smallDeltas)
+	header1 := bo.Uint32(buf1[:headerBytes])
+	_, _, _, _, hasDelta1, _, hasOverflow1 := decodeHeader(header1)
+	assert.True(hasDelta1, "PackAlreadyDeltaUint32 should set delta flag")
+	assert.False(hasOverflow1, "small deltas should NOT set overflow flag")
+
+	// Case 2: Deltas that will overflow - flag SHOULD be set
+	overflowDeltas := []uint32{0xFFFFFFFF, 1} // will overflow at index 1
+	buf2 := PackAlreadyDeltaUint32(nil, overflowDeltas)
+	header2 := bo.Uint32(buf2[:headerBytes])
+	_, _, _, _, hasDelta2, _, hasOverflow2 := decodeHeader(header2)
+	assert.True(hasDelta2, "PackAlreadyDeltaUint32 should set delta flag")
+	assert.True(hasOverflow2, "overflow deltas SHOULD set overflow flag")
+
+	// Verify actual overflow position
+	_, err := UnpackUint32(nil, buf2)
+	var overflow *ErrOverflow
+	assert.True(errors.As(err, &overflow), "overflow error should be returned")
+	assert.Equal(uint8(1), overflow.Position, "overflow should be at index 1")
+
+	// Case 3: Large but non-overflowing deltas - flag should NOT be set
+	largeDeltas := []uint32{0x80000000, 0x7FFFFFFF} // sum = 0xFFFFFFFF, no overflow
+	buf3 := PackAlreadyDeltaUint32(nil, largeDeltas)
+	header3 := bo.Uint32(buf3[:headerBytes])
+	_, _, _, _, hasDelta3, _, hasOverflow3 := decodeHeader(header3)
+	assert.True(hasDelta3, "PackAlreadyDeltaUint32 should set delta flag")
+	assert.False(hasOverflow3, "large but non-overflow deltas should NOT set overflow flag")
+}
+
+// TestPackDeltaUint32DoesNotSetMayOverflowFlag verifies that PackDeltaUint32 does NOT set the will-overflow flag.
+func TestPackDeltaUint32DoesNotSetMayOverflowFlag(t *testing.T) {
+	assert := assert.New(t)
+
+	values := []uint32{100, 105, 112, 118, 125}
+	buf := PackDeltaUint32(nil, values)
+
+	header := bo.Uint32(buf[:headerBytes])
+	_, _, _, _, hasDelta, _, willOverflow := decodeHeader(header)
+
+	assert.True(hasDelta, "PackDeltaUint32 should set delta flag")
+	assert.False(willOverflow, "PackDeltaUint32 should NOT set will-overflow flag")
+}
+
+// TestUnpackUint32DeltaNoOverflow verifies that no overflow is reported when deltas don't overflow.
+func TestUnpackUint32DeltaNoOverflow(t *testing.T) {
+	assert := assert.New(t)
+
+	// Small deltas that won't overflow
+	deltas := []uint32{100, 50, 30, 20, 10}
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	decoded, err := UnpackUint32(nil, buf)
+	assert.NoError(err, "no overflow should occur")
+
+	// Verify prefix sum: 100, 150, 180, 200, 210
+	expected := []uint32{100, 150, 180, 200, 210}
+	assert.Equal(expected, decoded)
+}
+
+// TestUnpackUint32DeltaWithOverflow verifies overflow detection at various positions.
+func TestUnpackUint32DeltaWithOverflow(t *testing.T) {
+	assert := assert.New(t)
+
+	// Create deltas that will overflow at index 3
+	// Starting from 0xFFFFFFF0, adding more will overflow
+	deltas := []uint32{0xFFFFFFF0, 5, 5, 10, 5} // overflow at index 3 (0xFFFFFFF0 + 5 + 5 + 10 overflows)
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	decoded, err := UnpackUint32(nil, buf)
+	var overflow *ErrOverflow
+	assert.True(errors.As(err, &overflow), "overflow error should be returned")
+	assert.Equal(uint8(3), overflow.Position, "overflow should be at index 3")
+
+	// Values before overflow should still be decoded (with wraparound after)
+	assert.Equal(uint32(0xFFFFFFF0), decoded[0])
+	assert.Equal(uint32(0xFFFFFFF5), decoded[1])
+	assert.Equal(uint32(0xFFFFFFFA), decoded[2])
+	// Index 3 causes overflow: 0xFFFFFFFA + 10 = overflow
+}
+
+// TestUnpackUint32DeltaOverflowAtIndex1 verifies overflow at the earliest possible position.
+func TestUnpackUint32DeltaOverflowAtIndex1(t *testing.T) {
+	assert := assert.New(t)
+
+	// Overflow at index 1 (second element) - the earliest possible
+	deltas := []uint32{0xFFFFFFFF, 1} // 0xFFFFFFFF + 1 = overflow
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	_, err := UnpackUint32(nil, buf)
+	var overflow *ErrOverflow
+	assert.True(errors.As(err, &overflow), "overflow error should be returned")
+	assert.Equal(uint8(1), overflow.Position, "overflow should be at index 1 (0-based)")
+}
+
+// TestPackDeltaUint32AlwaysReturnsNoOverflow verifies the fast path returns no overflow.
+func TestPackDeltaUint32AlwaysReturnsNoOverflow(t *testing.T) {
+	assert := assert.New(t)
+
+	// Even with large values, PackDeltaUint32 computes deltas, so no overflow
+	values := []uint32{1000000, 1000005, 1000010, 1000015}
+	buf := PackDeltaUint32(nil, values)
+
+	_, err := UnpackUint32(nil, buf)
+	assert.NoError(err, "PackDeltaUint32 blocks should never report overflow")
+}
+
+// TestReaderOverflowPos verifies Reader correctly reports overflow position.
+func TestReaderOverflowPos(t *testing.T) {
+	assert := assert.New(t)
+
+	// No overflow case
+	deltas1 := []uint32{100, 50, 30}
+	buf1 := PackAlreadyDeltaUint32(nil, deltas1)
+	reader1 := NewReader()
+	err := reader1.Load(buf1)
+	assert.NoError(err)
+	assert.False(reader1.HasOverflow(), "HasOverflow should be false when no overflow occurred")
+	assert.Equal(uint8(0), reader1.OverflowPos(), "OverflowPos should be 0 when no overflow")
+
+	// Overflow case
+	deltas2 := []uint32{0xFFFFFFFF, 1}
+	buf2 := PackAlreadyDeltaUint32(nil, deltas2)
+	reader2 := NewReader()
+	err = reader2.Load(buf2)
+	assert.NoError(err) // Load succeeds, overflow is detected but stored
+	assert.True(reader2.HasOverflow(), "HasOverflow should be true when overflow occurred")
+	assert.Equal(uint8(1), reader2.OverflowPos(), "OverflowPos should be 1 (0-based index)")
+}
+
+// TestSlimReaderOverflowPosIteration verifies SlimReader detects overflow during Next() iteration.
+func TestSlimReaderOverflowPosIteration(t *testing.T) {
+	assert := assert.New(t)
+
+	// Overflow case
+	deltas := []uint32{0xFFFFFFF0, 5, 5, 20}
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	reader := NewSlimReader()
+	err := reader.Load(buf)
+	assert.NoError(err)
+	assert.True(reader.HasOverflow(), "HasOverflow should be true when flag is set")
+	assert.Equal(uint8(0), reader.OverflowPos(), "OverflowPos should be 0 before iteration")
+
+	// Iterate through all values
+	for {
+		_, _, ok := reader.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.True(reader.HasOverflow(), "HasOverflow should still be true")
+	assert.Equal(uint8(3), reader.OverflowPos(), "OverflowPos should be 3 (0xFFFFFFF0 + 5 + 5 + 20 overflows)")
+}
+
+// TestSlimReaderOverflowPosDecode verifies SlimReader detects overflow during Decode().
+func TestSlimReaderOverflowPosDecode(t *testing.T) {
+	assert := assert.New(t)
+
+	deltas := []uint32{0xFFFFFFFF, 1}
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	reader := NewSlimReader()
+	err := reader.Load(buf)
+	assert.NoError(err)
+
+	_ = reader.Decode(nil) // This should trigger overflow detection
+
+	assert.True(reader.HasOverflow(), "HasOverflow should be true when flag is set")
+	assert.Equal(uint8(1), reader.OverflowPos(), "OverflowPos should be 1 (0-based index)")
+}
+
+// TestPackAlreadyDeltaUint32RoundTrip verifies the full round-trip without overflow.
+func TestPackAlreadyDeltaUint32RoundTrip(t *testing.T) {
+	assert := assert.New(t)
+
+	// Create deltas that represent differences between values
+	// Simulating: 1000, 1010, 1025, 1040, 1060 → deltas: 1000, 10, 15, 15, 20
+	deltas := []uint32{1000, 10, 15, 15, 20}
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	decoded, err := UnpackUint32(nil, buf)
+	assert.NoError(err)
+
+	// Expected prefix sums: 1000, 1010, 1025, 1040, 1060
+	expected := []uint32{1000, 1010, 1025, 1040, 1060}
+	assert.Equal(expected, decoded)
+}
+
+// TestErrOverflowError verifies the ErrOverflow error type and its Error() method.
+func TestErrOverflowError(t *testing.T) {
+	assert := assert.New(t)
+
+	deltas := []uint32{0xFFFFFFFF, 1}
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	_, err := UnpackUint32(nil, buf)
+
+	// Verify it's an error
+	assert.Error(err)
+
+	// Verify error message contains useful info
+	assert.Contains(err.Error(), "overflow")
+	assert.Contains(err.Error(), "1") // position
+
+	// Verify errors.As works
+	var overflow *ErrOverflow
+	assert.True(errors.As(err, &overflow))
+	assert.Equal(uint8(1), overflow.Position)
+
+	// Verify errors.Is does NOT match (it's a pointer type, not sentinel)
+	assert.False(errors.Is(err, &ErrOverflow{}))
+}
+
+// TestOverflowAtPosition127 verifies overflow detection at the last possible position (index 127).
+func TestOverflowAtPosition127(t *testing.T) {
+	assert := assert.New(t)
+
+	// Create a full block (128 elements) where overflow happens at index 127
+	deltas := make([]uint32, 128)
+	// All small values except the last one triggers overflow
+	for i := range deltas {
+		deltas[i] = 0x02000000 // Each adds ~33 million
+	}
+	// After 127 additions: 127 * 0x02000000 = 0xFE000000
+	// At index 127: 0xFE000000 + 0x02000000 = 0x100000000 = overflow!
+
+	buf := PackAlreadyDeltaUint32(nil, deltas)
+
+	decoded, err := UnpackUint32(nil, buf)
+	var overflow *ErrOverflow
+	assert.True(errors.As(err, &overflow), "overflow error should be returned")
+	assert.Equal(uint8(127), overflow.Position, "overflow should be at index 127")
+
+	// Verify values up to overflow are correct
+	var expected uint32
+	for i := 0; i < 127; i++ {
+		expected += 0x02000000
+		assert.Equal(expected, decoded[i], "value at index %d", i)
+	}
+
+	// Test with Reader
+	reader := NewReader()
+	err = reader.Load(buf)
+	assert.NoError(err)
+	assert.True(reader.HasOverflow())
+	assert.Equal(uint8(127), reader.OverflowPos())
+
+	// Test with SlimReader iteration
+	slimReader := NewSlimReader()
+	err = slimReader.Load(buf)
+	assert.NoError(err)
+	for {
+		_, _, ok := slimReader.Next()
+		if !ok {
+			break
+		}
+	}
+	assert.True(slimReader.HasOverflow())
+	assert.Equal(uint8(127), slimReader.OverflowPos())
+}
+
+// TestInvalidFlagCombinationZigZagAndWillOverflow verifies that zigzag + willOverflow flags return an error.
+func TestInvalidFlagCombinationZigZagAndWillOverflow(t *testing.T) {
+	assert := assert.New(t)
+
+	// Create values with negative deltas so PackDeltaUint32 uses zigzag encoding
+	// (300 → 200 → 100 has negative deltas)
+	values := []uint32{300, 200, 100}
+	buf := PackDeltaUint32(nil, values)
+
+	// Verify zigzag flag is set
+	header := bo.Uint32(buf[:headerBytes])
+	_, _, _, _, _, hasZigZag, _ := decodeHeader(header)
+	assert.True(hasZigZag, "test setup: zigzag flag should be set for negative deltas")
+
+	// Manually set the will-overflow flag in the header (bit 16)
+	header |= headerWillOverflowFlag
+	bo.PutUint32(buf[:headerBytes], header)
+
+	// UnpackUint32 should return an error for this invalid combination
+	_, err := UnpackUint32(nil, buf)
+	assert.Error(err, "should return error for invalid zigzag + will-overflow combination")
+	assert.ErrorIs(err, ErrInvalidFlags)
+
+	// SlimReader should also return an error
+	reader := NewSlimReader()
+	err = reader.Load(buf)
+	assert.Error(err, "SlimReader should return error for invalid flag combination")
+	assert.ErrorIs(err, ErrInvalidFlags)
 }
 
 // -----------------------------------------------------------------------------
@@ -1538,13 +1843,13 @@ func encodeHighBitsForTest(highBits []uint32) []byte {
 
 func getBitWidth(buf []byte) int {
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	_, bitWidth, _, _, _, _ := decodeHeader(header)
+	_, bitWidth, _, _, _, _, _ := decodeHeader(header)
 	return bitWidth
 }
 
 func getExceptionCount(buf []byte) int {
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	_, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+	_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 	if !hasExceptions {
 		return 0
 	}
@@ -1592,7 +1897,7 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 		t.Fatalf("encoded buffer too small: %d", len(buf))
 	}
 	header := binary.LittleEndian.Uint32(buf[:headerBytes])
-	count, bitWidth, _, hasExceptions, _, _ := decodeHeader(header)
+	count, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
 	if count < 0 || count > blockSize {
 		t.Fatalf("invalid element count %d", count)
 	}

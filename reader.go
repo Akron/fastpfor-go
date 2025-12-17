@@ -24,6 +24,9 @@ type Reader struct {
 
 	// loaded indicates if the reader has been loaded with data
 	loaded bool
+
+	// overflowPos is the 0-based index of first overflow during delta decoding (0 = no overflow)
+	overflowPos uint8
 }
 
 // ErrInvalidBuffer is returned when the buffer is too small or malformed.
@@ -42,7 +45,7 @@ func NewReader() *Reader {
 
 // Load a FastPFOR-compressed byte buffer into the reader.
 // This resets all internal state and can be called multiple times to reuse the reader.
-// The buffer must contain a valid single block (packed with PackUint32 or PackDeltaUint32).
+// The buffer must contain a valid single block (packed with PackUint32, PackDeltaUint32, or PackAlreadyDeltaUint32).
 func (r *Reader) Load(buf []byte) error {
 	// Quick header check for isSorted flag before unpacking
 	if len(buf) < headerBytes {
@@ -50,13 +53,23 @@ func (r *Reader) Load(buf []byte) error {
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
 	header := bo.Uint32(buf[:headerBytes])
-	count, _, _, _, hasDelta, hasZigZag := decodeHeader(header)
+	count, _, _, _, hasDelta, hasZigZag, _ := decodeHeader(header)
 
 	// Unpack using the standard function (reuses r.values buffer)
+	r.overflowPos = 0
+
 	values, err := UnpackUint32(r.values, buf)
+
 	if err != nil {
-		return err
+		var overflowErr *ErrOverflow
+		if errors.As(err, &overflowErr) {
+			err = nil // Overflow is handled, not a fatal error
+			r.overflowPos = overflowErr.Position
+		} else {
+			return err
+		}
 	}
+	// Capture overflow error separately (it's not a fatal error, just informational)
 
 	// Update state
 	r.values = values
@@ -191,4 +204,18 @@ func (r *Reader) Decode(dst []uint32) []uint32 {
 // This is true when delta encoding was used without zigzag (positive deltas only).
 func (r *Reader) IsSorted() bool {
 	return r.isSorted
+}
+
+// OverflowPos returns the 0-based index of the first overflow detected during delta decoding.
+// Returns 0 if no overflow occurred. Note: 0 cannot indicate an actual overflow since the
+// first element (index 0) is just copied; overflow can only occur at index 1 or later.
+// Only meaningful after Load() has been called.
+func (r *Reader) OverflowPos() uint8 {
+	return r.overflowPos
+}
+
+// HasOverflow returns true if overflow occurred during delta decoding.
+// Only meaningful after Load() has been called.
+func (r *Reader) HasOverflow() bool {
+	return r.overflowPos != 0
 }

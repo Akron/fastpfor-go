@@ -14,24 +14,25 @@ import "fmt"
 // SlimReader is safe for concurrent read access to the same underlying buffer,
 // but each SlimReader instance should not be accessed concurrently.
 type SlimReader struct {
-	buf        []byte // 24 bytes - slice header pointing to compressed data
-	lastValue  uint32 // 4 bytes - cumulative value for delta iteration
-	count      uint8  // 1 byte - element count (0-128)
-	bitWidth   uint8  // 1 byte - bit width for packed values (0-32)
-	flags      uint8  // 1 byte - packed flags (includes loaded flag)
-	pos        uint8  // 1 byte - current iteration position
-	payloadEnd uint16 // 2 bytes - offset where payload ends (exceptions start)
-	excPos     uint8  // 1 byte - current exception index for iteration
-	_          uint8  // 1 byte - padding
+	buf         []byte // 24 bytes - slice header pointing to compressed data
+	lastValue   uint32 // 4 bytes - cumulative value for delta iteration
+	count       uint8  // 1 byte - element count (0-128)
+	bitWidth    uint8  // 1 byte - bit width for packed values (0-32)
+	flags       uint8  // 1 byte - packed flags (includes loaded flag)
+	pos         uint8  // 1 byte - current iteration position
+	payloadEnd  uint16 // 2 bytes - offset where payload ends (exceptions start)
+	excPos      uint8  // 1 byte - current exception index for iteration
+	overflowPos uint8  // 1 byte - 0-based index of first overflow (0 = no overflow detected)
 	// Total: 24 + 4 + 8 = 36 bytes, aligned to 40 bytes
 }
 
 // SlimReader flag bits
 const (
-	slimFlagDelta      = 1 << 0
-	slimFlagZigZag     = 1 << 1
-	slimFlagExceptions = 1 << 2
-	slimFlagLoaded     = 1 << 3
+	slimFlagDelta        = 1 << 0
+	slimFlagZigZag       = 1 << 1
+	slimFlagExceptions   = 1 << 2
+	slimFlagLoaded       = 1 << 3
+	slimFlagWillOverflow = 1 << 4
 )
 
 // NewSlimReader creates an empty SlimReader that must be loaded with Load() before use.
@@ -50,10 +51,15 @@ func (r *SlimReader) Load(buf []byte) error {
 	}
 
 	header := bo.Uint32(buf[:headerBytes])
-	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag := decodeHeader(header)
+	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag, willOverflow := decodeHeader(header)
 
 	if count < 0 || count > blockSize {
 		return fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
+	}
+
+	// Validate flag combination: willOverflow requires non-zigzag delta encoding
+	if willOverflow && hasZigZag {
+		return fmt.Errorf("%w: will-overflow flag cannot be combined with zigzag encoding", ErrInvalidFlags)
 	}
 
 	payloadLen := payloadBytes(bitWidth)
@@ -75,6 +81,9 @@ func (r *SlimReader) Load(buf []byte) error {
 	if hasExceptions {
 		flags |= slimFlagExceptions
 	}
+	if willOverflow {
+		flags |= slimFlagWillOverflow
+	}
 
 	// Reset all state
 	r.buf = buf
@@ -85,6 +94,7 @@ func (r *SlimReader) Load(buf []byte) error {
 	r.pos = 0
 	r.excPos = 0
 	r.lastValue = 0
+	r.overflowPos = 0
 
 	return nil
 }
@@ -97,6 +107,21 @@ func (r *SlimReader) IsLoaded() bool {
 // IsSorted returns true if the data is sorted (delta-encoded without zigzag).
 func (r *SlimReader) IsSorted() bool {
 	return r.flags&slimFlagDelta != 0 && r.flags&slimFlagZigZag == 0
+}
+
+// OverflowPos returns the 0-based index of the first overflow detected during iteration.
+// Returns 0 if no overflow occurred. Note: 0 cannot indicate an actual overflow since the
+// first element (index 0) is just copied; overflow can only occur at index 1 or later.
+// Only meaningful after iterating with Next() or calling Decode() on a block with will-overflow flag.
+func (r *SlimReader) OverflowPos() uint8 {
+	return r.overflowPos
+}
+
+// HasOverflow returns true if the will-overflow flag is set in the header.
+// This indicates the block was packed with PackAlreadyDeltaUint32 and may overflow during decode.
+// Only meaningful after Load() has been called.
+func (r *SlimReader) HasOverflow() bool {
+	return r.flags&slimFlagWillOverflow != 0
 }
 
 // Len returns the number of elements in the block.
@@ -227,7 +252,6 @@ applyException:
 
 // getWithDelta decodes values with delta encoding (requires prefix sum).
 func (r *SlimReader) getWithDelta(pos uint32) uint32 {
-	// Stack-allocated buffer for decoding (2*blockSize for values + scratch)
 	var values [2 * blockSize]uint32
 
 	count := int(r.count)
@@ -244,9 +268,16 @@ func (r *SlimReader) getWithDelta(pos uint32) uint32 {
 		_ = applyExceptions(values[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
 	}
 
-	// Apply delta decoding
+	// Apply delta decoding (with overflow detection if will-overflow flag is set)
 	useZigZag := r.flags&slimFlagZigZag != 0
-	deltaDecode(values[:count], values[:count], useZigZag)
+	if r.flags&slimFlagWillOverflow != 0 {
+		overflowPos := deltaDecodeWithOverflow(values[:count], values[:count], useZigZag)
+		if r.overflowPos == 0 && overflowPos > 0 {
+			r.overflowPos = overflowPos
+		}
+	} else {
+		deltaDecode(values[:count], values[:count], useZigZag)
+	}
 
 	return values[pos]
 }
@@ -305,6 +336,10 @@ func (r *SlimReader) nextValue() uint32 {
 			value = uint32(zigzagDecode32(value))
 		}
 		value += r.lastValue
+		// Detect overflow only when will-overflow flag is set
+		if r.flags&slimFlagWillOverflow != 0 && r.overflowPos == 0 && value < r.lastValue {
+			r.overflowPos = r.pos // 0-based index (always >= 1 when overflow occurs)
+		}
 		r.lastValue = value
 	}
 
@@ -367,10 +402,17 @@ func (r *SlimReader) Decode(dst []uint32) []uint32 {
 		_ = applyExceptions(dst[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
 	}
 
-	// Apply delta decoding if needed
+	// Apply delta decoding if needed (with overflow detection if will-overflow flag is set)
 	if r.flags&slimFlagDelta != 0 {
 		useZigZag := r.flags&slimFlagZigZag != 0
-		deltaDecode(dst, dst, useZigZag)
+		if r.flags&slimFlagWillOverflow != 0 {
+			overflowPos := deltaDecodeWithOverflow(dst, dst, useZigZag)
+			if r.overflowPos == 0 && overflowPos > 0 {
+				r.overflowPos = overflowPos
+			}
+		} else {
+			deltaDecode(dst, dst, useZigZag)
+		}
 	}
 
 	return dst
