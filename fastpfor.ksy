@@ -33,6 +33,9 @@ types:
       bit_width:
         value: (raw >> 8) & 0x3F
         doc: Bit width used for packing the payload lanes.
+      flag_will_overflow:
+        value: (raw & (1 << 28)) != 0
+        doc: Indicates the packed deltas will overflow uint32 during decode.
       flag_delta:
         value: (raw & (1 << 29)) != 0
         doc: Indicates if delta encoding was used.

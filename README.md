@@ -65,49 +65,6 @@ decoded, _ := fastpfor.UnpackUint32(nil, encoded)
 **Note:** `PackDeltaUint32` performs delta encoding in-place, mutating the input slice.
 If you need to preserve the original values, make a copy first.
 
-### Pre-computed Deltas with Overflow Handling
-
-For cases where you have pre-computed delta values (e.g., from external sources) that may
-overflow `uint32` when decoded, use `PackAlreadyDeltaUint32`:
-
-```go
-// Pre-computed deltas that may cause overflow during prefix sum
-deltas := []uint32{0xFFFFFFFF, 1, 5, 10}
-
-// Pack - automatically detects if overflow will occur
-encoded := fastpfor.PackAlreadyDeltaUint32(nil, deltas)
-
-// Unpack - returns ErrOverflow if overflow occurs
-decoded, err := fastpfor.UnpackUint32(nil, encoded)
-if err != nil {
-    var overflow *fastpfor.ErrOverflow
-    if errors.As(err, &overflow) {
-        // Overflow occurred at index overflow.Position (0-based)
-        // Values are still decoded (with wraparound after overflow)
-        fmt.Printf("Overflow at index %d\n", overflow.Position)
-        // Handle overflow case (e.g., use uint64 for full precision)
-    } else {
-        // Actual error (invalid buffer, etc.)
-        return err
-    }
-}
-```
-
-The overflow position is a 0-based index. Note that overflow cannot occur at index 0
-(the first delta is just copied); the earliest possible overflow is at index 1.
-
-Readers also provide overflow detection:
-
-```go
-reader := fastpfor.NewReader()
-if err := reader.Load(encoded); err != nil {
-    return err
-}
-
-if reader.HasOverflow() {
-    fmt.Printf("Overflow at index %d\n", reader.OverflowPos())
-}
-```
 
 Reuse buffers to avoid allocations in hot paths:
 
@@ -121,6 +78,7 @@ for _, block := range blocks {
     // Process decoded...
 }
 ```
+
 
 
 ## Reader Types
@@ -167,6 +125,50 @@ Ideal for MMAP'd data with millions of readers.
 reader := fastpfor.NewSlimReader()
 if err := reader.Load(mmappedData); err != nil {
     return err
+}
+```
+
+## Pre-computed Deltas with Overflow Handling
+
+For cases where you have pre-computed delta values (e.g., from external sources) that may
+overflow `uint32` when decoded, use `PackAlreadyDeltaUint32`:
+
+```go
+// Pre-computed deltas that may cause overflow during prefix sum
+deltas := []uint32{0xFFFFFFFF, 1, 5, 10}
+
+// Pack - automatically detects if overflow will occur
+encoded := fastpfor.PackAlreadyDeltaUint32(nil, deltas)
+
+// Unpack - returns ErrOverflow if overflow occurs
+decoded, err := fastpfor.UnpackUint32(nil, encoded)
+if err != nil {
+    var overflow *fastpfor.ErrOverflow
+    if errors.As(err, &overflow) {
+        // Overflow occurred at index overflow.Position (0-based)
+        // Values are still decoded (with wraparound after overflow)
+        fmt.Printf("Overflow at index %d\n", overflow.Position)
+        // Handle overflow case (e.g., use uint64 for full precision)
+    } else {
+        // Actual error (invalid buffer, etc.)
+        return err
+    }
+}
+```
+
+The overflow position is a 0-based index. Note that overflow cannot occur at index 0
+(the first delta is just copied); the earliest possible overflow is at index 1.
+
+Readers also provide overflow detection for `PackAlreadyDeltaUint32()` compressed data:
+
+```go
+reader := fastpfor.NewReader()
+if err := reader.Load(encoded); err != nil {
+    return err
+}
+
+if reader.HasOverflow() {
+    fmt.Printf("Overflow at index %d\n", reader.OverflowPos())
 }
 ```
 
