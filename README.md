@@ -5,14 +5,7 @@ Package fastpfor implements integer encoding and decoding using
 making use of SIMD kernels provided by [robskie/bp128](github.com/robskie/bp128).
 Exceptions are compressed using [StreamVByte](https://github.com/mhr3/streamvbyte) [3].
 
-*! This is work in progress and especially the layout may change significantly in the future.*
-
-- [1] Zukowski, M., Heman, S., Nes, N., & Boncz, P. (2006). *Super-Scalar RAM-CPU Cache Compression*.
-    22nd International Conference on Data Engineering (ICDE’06), 59–59.
-    https://doi.org/10.1109/ICDE.2006.150
-- [2] Lemire, D., & Boytsov, L. (2015). *Decoding billions of integers per second through vectorization*.
-    Software: Practice and Experience, 45(1), 1–29. https://doi.org/10.1002/spe.2203
-- [3] Lemire, D., Kurz, N. & Rupp, C. (2018). *Stream VByte: Faster Byte-Oriented Integer Compression*, Information Processing Letters 130.
+**Note:** This is work in progress and especially the layout may change significantly in the future.
 
 ## Installation
 ```sh
@@ -62,8 +55,6 @@ encoded := fastpfor.PackDeltaUint32(nil, timestamps)
 decoded, _ := fastpfor.UnpackUint32(nil, encoded)
 ```
 
-**Note:** `PackDeltaUint32` performs delta encoding in-place, mutating the input slice.
-If you need to preserve the original values, make a copy first.
 
 
 Reuse buffers to avoid allocations in hot paths:
@@ -118,7 +109,8 @@ values := reader.Decode(nil)
 
 ### SlimReader
 
-`SlimReader` decodes on-the-fly with minimal memory overhead per instance.
+`SlimReader` decodes on-the-fly with minimal memory overhead per instance,
+but is significantly slower than the full reader.
 Ideal for MMAP'd data with millions of readers.
 
 ```go
@@ -233,6 +225,8 @@ The high bits are encoded using [StreamVByte](https://github.com/mhr3/streamvbyt
 a variable-byte encoding that compresses small integers efficiently.
 They are later re-applied with `dst[pos] |= exc << bitWidth`.
 
+A [Kaitai Struct](https://kaitai.io/) definition file is part of this repository.
+
 ## Build Tags
 
 The `noasm` build tag disables all assembly optimizations, forcing pure Go implementations:
@@ -243,10 +237,7 @@ go test -tags=noasm ./...
 ```
 
 This tag is shared with the [StreamVByte](https://github.com/mhr3/streamvbyte) dependency,
-so using `-tags=noasm` disables SIMD in both libraries simultaneously. This is useful for:
-- Debugging
-- Cross-compilation to non-amd64 platforms
-- Comparing SIMD vs scalar performance
+so using `-tags=noasm` disables SIMD in both libraries simultaneously.
 
 ## Fuzzing
 - `go test -fuzz=FuzzPackRoundTrip -fuzztime=1m ./...`
@@ -269,3 +260,12 @@ This library was developed with AI assistance (Claude Sonnet 4.5, Gemini 3, GPT 
 Copyright (c) 2015-2016 robskie <mrobskie@gmail.com>
 
 Copyright (c) 2025 Nils Diewald
+
+## Literature
+
+- [1] Zukowski, M., Heman, S., Nes, N., & Boncz, P. (2006). *Super-Scalar RAM-CPU Cache Compression*.
+    22nd International Conference on Data Engineering (ICDE’06), 59–59.
+    https://doi.org/10.1109/ICDE.2006.150
+- [2] Lemire, D., & Boytsov, L. (2015). *Decoding billions of integers per second through vectorization*.
+    Software: Practice and Experience, 45(1), 1–29. https://doi.org/10.1002/spe.2203
+- [3] Lemire, D., Kurz, N. & Rupp, C. (2018). *Stream VByte: Faster Byte-Oriented Integer Compression*, Information Processing Letters 130.
