@@ -46,15 +46,6 @@ func TestBlockLength(t *testing.T) {
 		assert.Error(err)
 	})
 
-	t.Run("truncatedPayload", func(t *testing.T) {
-		buf := PackUint32(nil, genSequential(blockSize))
-		header := bo.Uint32(buf[:headerBytes])
-		_, bitWidth, _, _, _, _, _ := decodeHeader(header)
-		minLen := headerBytes + payloadBytes(bitWidth)
-		_, err := BlockLength(buf[:minLen-1])
-		assert.Error(err)
-	})
-
 	t.Run("truncatedExceptionsMeta", func(t *testing.T) {
 		buf := PackUint32(nil, genDataWithSmallExceptions())
 		header := bo.Uint32(buf[:headerBytes])

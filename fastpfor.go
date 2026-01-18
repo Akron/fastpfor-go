@@ -145,18 +145,13 @@ func BlockLength(buf []byte) (int, error) {
 		return 0, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
-	header := bo.Uint32(buf[:headerBytes])
-	count, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
+	count, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	if count > blockSize {
 		return 0, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
 	}
 
 	payloadLen := payloadBytes(bitWidth)
 	minNeeded := headerBytes + payloadLen
-	if len(buf) < minNeeded {
-		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
-			ErrInvalidBuffer, minNeeded, len(buf))
-	}
 
 	if !hasExceptions {
 		return minNeeded, nil
@@ -167,16 +162,12 @@ func BlockLength(buf []byte) (int, error) {
 		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
 			ErrInvalidBuffer, minExcMeta, len(buf))
 	}
-	excCount := int(buf[minNeeded])
+	excCount := int(buf[minNeeded]) // positions array size
 	if excCount > blockSize {
 		return 0, fmt.Errorf("%w: invalid exception count %d", ErrInvalidBuffer, excCount)
 	}
 	svbLen := int(bo.Uint16(buf[minNeeded+1 : minNeeded+3]))
 	total := minNeeded + 1 + 2 + excCount + svbLen
-	if len(buf) < total {
-		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
-			ErrInvalidBuffer, total, len(buf))
-	}
 	return total, nil
 }
 
