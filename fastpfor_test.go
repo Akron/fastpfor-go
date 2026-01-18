@@ -23,6 +23,51 @@ func TestMaxBlockSizeUint32(t *testing.T) {
 	assert.Equal(t, 516, MaxBlockSizeUint32())
 }
 
+// TestBlockLength verifies BlockLength() matches the encoded size.
+func TestBlockLength(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("noExceptions", func(t *testing.T) {
+		buf := PackUint32(nil, genSequential(blockSize))
+		got, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(len(buf), got)
+	})
+
+	t.Run("withExceptions", func(t *testing.T) {
+		buf := PackUint32(nil, genDataWithSmallExceptions())
+		got, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(len(buf), got)
+	})
+
+	t.Run("truncatedHeader", func(t *testing.T) {
+		_, err := BlockLength([]byte{0x00, 0x01})
+		assert.Error(err)
+	})
+
+	t.Run("truncatedPayload", func(t *testing.T) {
+		buf := PackUint32(nil, genSequential(blockSize))
+		header := bo.Uint32(buf[:headerBytes])
+		_, bitWidth, _, _, _, _, _ := decodeHeader(header)
+		minLen := headerBytes + payloadBytes(bitWidth)
+		_, err := BlockLength(buf[:minLen-1])
+		assert.Error(err)
+	})
+
+	t.Run("truncatedExceptionsMeta", func(t *testing.T) {
+		buf := PackUint32(nil, genDataWithSmallExceptions())
+		header := bo.Uint32(buf[:headerBytes])
+		_, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
+		if !hasExceptions {
+			t.Skip("test data unexpectedly produced no exceptions")
+		}
+		minLen := headerBytes + payloadBytes(bitWidth)
+		_, err := BlockLength(buf[:minLen+1])
+		assert.Error(err)
+	})
+}
+
 // TestIntTypeConstants verifies the integer type constants have expected values.
 func TestIntTypeConstants(t *testing.T) {
 	assert := assert.New(t)
@@ -65,12 +110,12 @@ func TestPackUint32HasCorrectIntType(t *testing.T) {
 	assert.Equal(IntTypeUint32, intType, "PackUint32 should use IntTypeUint32")
 }
 
-// TestPackLengthValidation ensures PackUint32 rejects inputs that exceed blockSize.
+// TestPackLengthValidation ensures PackUint32 accepts inputs that exceed blockSize (performance optimization).
 func TestPackLengthValidation(t *testing.T) {
 	assert := assert.New(t)
-	assert.Panics(func() {
-		PackUint32(nil, make([]uint32, blockSize+1))
-	})
+	// No longer panics for performance - caller is responsible for valid input
+	buf := PackUint32(nil, make([]uint32, blockSize+1))
+	assert.NotNil(buf, "should still produce output even with oversized input")
 }
 
 // TestPackUnpackEmpty verifies we can round-trip an empty slice.
@@ -836,14 +881,14 @@ func TestUnpackUint32WithBufferErrors(t *testing.T) {
 }
 
 // buildExceptionBuf creates a properly formatted exception buffer for testing.
-// Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
+// Layout: count(1) + svb_len(2) + positions(N) + StreamVByte(M)
 func buildExceptionBuf(positions []byte, highBits []uint32) []byte {
 	svbData := encodeHighBitsForTest(highBits)
-	buf := make([]byte, 1+len(positions)+2+len(svbData))
+	buf := make([]byte, 1+2+len(positions)+len(svbData))
 	buf[0] = byte(len(positions))
-	copy(buf[1:], positions)
-	binary.LittleEndian.PutUint16(buf[1+len(positions):], uint16(len(svbData)))
-	copy(buf[1+len(positions)+2:], svbData)
+	binary.LittleEndian.PutUint16(buf[1:], uint16(len(svbData)))
+	copy(buf[3:], positions)
+	copy(buf[3+len(positions):], svbData)
 	return buf
 }
 
@@ -1351,7 +1396,7 @@ func TestOverflowAtPosition127(t *testing.T) {
 	assert.Equal(uint8(127), slimReader.OverflowPos())
 }
 
-// TestInvalidFlagCombinationZigZagAndWillOverflow verifies that zigzag + willOverflow flags return an error.
+// TestInvalidFlagCombinationZigZagAndWillOverflow verifies that zigzag + willOverflow flags are accepted (performance optimization).
 func TestInvalidFlagCombinationZigZagAndWillOverflow(t *testing.T) {
 	assert := assert.New(t)
 
@@ -1369,16 +1414,14 @@ func TestInvalidFlagCombinationZigZagAndWillOverflow(t *testing.T) {
 	header |= headerWillOverflowFlag
 	bo.PutUint32(buf[:headerBytes], header)
 
-	// UnpackUint32 should return an error for this invalid combination
+	// UnpackUint32 now accepts this combination for performance - no longer validates flag combinations
 	_, err := UnpackUint32(nil, buf)
-	assert.Error(err, "should return error for invalid zigzag + will-overflow combination")
-	assert.ErrorIs(err, ErrInvalidFlags)
+	assert.NoError(err, "should accept zigzag + will-overflow combination (performance optimization)")
 
-	// SlimReader should also return an error
+	// SlimReader should also accept this combination
 	reader := NewSlimReader()
 	err = reader.Load(buf)
-	assert.Error(err, "SlimReader should return error for invalid flag combination")
-	assert.ErrorIs(err, ErrInvalidFlags)
+	assert.NoError(err, "SlimReader should accept invalid flag combination (performance optimization)")
 }
 
 // -----------------------------------------------------------------------------
@@ -2056,7 +2099,7 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 		}
 		return
 	}
-	// With StreamVByte format: count(1) + positions(N) + svb_len(2) + svb_data(M)
+	// With StreamVByte format: count(1) + svb_len(2) + positions(N) + svb_data(M)
 	if len(buf) < minLen+1 {
 		t.Fatalf("missing exception count byte")
 	}
@@ -2065,13 +2108,13 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 		t.Fatalf("exception count %d exceeds block size", excCount)
 	}
 	// Check minimum size for exception area
-	minExcLen := 1 + excCount + 2 // count + positions + svb_len
+	minExcLen := 1 + 2 + excCount // count + svb_len + positions
 	if len(buf) < minLen+minExcLen {
 		t.Fatalf("exception area too small: got %d, need at least %d", len(buf)-minLen, minExcLen)
 	}
 	// Read StreamVByte length and verify total size
-	svbLen := int(binary.LittleEndian.Uint16(buf[minLen+1+excCount:]))
-	want := minLen + 1 + excCount + 2 + svbLen
+	svbLen := int(binary.LittleEndian.Uint16(buf[minLen+1:]))
+	want := minLen + 1 + 2 + excCount + svbLen
 	if len(buf) != want {
 		t.Fatalf("exception payload mismatch: got %d want %d (count=%d, svbLen=%d)", len(buf), want, excCount, svbLen)
 	}

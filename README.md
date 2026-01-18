@@ -84,6 +84,23 @@ for _, block := range blocks {
 }
 ```
 
+### BlockLength
+
+When scanning a stream of concatenated blocks, `BlockLength` lets you skip
+blocks without decoding them:
+
+```go
+for len(buf) > 0 {
+    n, err := fastpfor.BlockLength(buf)
+    if err != nil {
+        return err
+    }
+    block := buf[:n]
+    buf = buf[n:]
+    // ... process block ...
+}
+```
+
 
 
 ## Reader Types
@@ -204,10 +221,10 @@ Integer Block
 │   ├── ... (bitWidth blocks total)
 ├── Patch (if exceptionFlag set)
 │   ├── exceptionCount   // 1 Byte
+│   ├── svbLen           // 2 Bytes (little-endian)
 │   ├── Positions        // (exceptionCount * 1) Bytes
 │   │   ├── pos1         // 1 Byte
-│   │   ├── ... 
-│   ├── svbLen           // 2 Bytes (little-endian)
+│   │   ├── ...
 │   ├── StreamVByte      // svbLen Bytes (variable-byte encoded high bits)
 ```
 

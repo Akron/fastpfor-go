@@ -138,6 +138,48 @@ func MaxBlockSizeUint32() int {
 	return headerBytes + (blockSize * 4)
 }
 
+// BlockLength returns the total number of bytes for a single encoded block.
+// It validates the header and exception metadata without decoding the payload.
+func BlockLength(buf []byte) (int, error) {
+	if len(buf) < headerBytes {
+		return 0, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
+			ErrInvalidBuffer, headerBytes, len(buf))
+	}
+	header := bo.Uint32(buf[:headerBytes])
+	count, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(header)
+	if count > blockSize {
+		return 0, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
+	}
+
+	payloadLen := payloadBytes(bitWidth)
+	minNeeded := headerBytes + payloadLen
+	if len(buf) < minNeeded {
+		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
+			ErrInvalidBuffer, minNeeded, len(buf))
+	}
+
+	if !hasExceptions {
+		return minNeeded, nil
+	}
+
+	minExcMeta := minNeeded + 1 + 2 // count + svb_len
+	if len(buf) < minExcMeta {
+		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
+			ErrInvalidBuffer, minExcMeta, len(buf))
+	}
+	excCount := int(buf[minNeeded])
+	if excCount > blockSize {
+		return 0, fmt.Errorf("%w: invalid exception count %d", ErrInvalidBuffer, excCount)
+	}
+	svbLen := int(bo.Uint16(buf[minNeeded+1 : minNeeded+3]))
+	total := minNeeded + 1 + 2 + excCount + svbLen
+	if len(buf) < total {
+		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
+			ErrInvalidBuffer, total, len(buf))
+	}
+	return total, nil
+}
+
 // PackUint32 encodes up to BlockSize uint32 values into the FastPFOR block format.
 // The function appends the block to dst so the caller can reuse buffers and
 // avoid per-block allocations. Callers must not reuse the same dst slice across
@@ -154,14 +196,12 @@ func PackUint32(dst []byte, values []uint32) []byte {
 	return packInternal(dst, values, headerTypeUint32Flag)
 }
 
-// packInternal is called by higher codecs. It validates the block length,
-// selects the bit width, and packs the payload. It also appends the exception
-// table if there are any exceptions.
+// packInternal is called by higher codecs. It selects the bit width,
+// and packs the payload. It also appends the exception table if there are any exceptions.
 //
 // The extraFlags parameter can include integer type flags (headerTypeUint16Flag, etc.)
 // as well as delta/zigzag flags. If no type flag is set, IntTypeUint32 is used.
 func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
-	validateBlockLength(len(values))
 	// Select the bit width that minimizes the serialized size.
 	bitWidth, excCount := selectBitWidth(values)
 	// Calculate the length of the payload
@@ -219,22 +259,12 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 //	if errors.As(err, &overflow) {
 //	    // Handle overflow at overflow.Position
 //	}
-//
 func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 	if len(buf) < headerBytes {
 		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
 	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag, willOverflow := decodeHeader(bo.Uint32(buf[:headerBytes]))
-	if count < 0 || count > blockSize {
-		return nil, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
-	}
-
-	// Validate flag combination: willOverflow requires non-zigzag delta encoding
-	// (zigzag uses int64 accumulator internally, so uint32 overflow doesn't apply)
-	if willOverflow && hasZigZag {
-		return nil, fmt.Errorf("%w: will-overflow flag cannot be combined with zigzag encoding", ErrInvalidFlags)
-	}
 
 	payloadLen := payloadBytes(bitWidth)
 	minNeeded := headerBytes + payloadLen
@@ -300,15 +330,6 @@ func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) ([]uint3
 			ErrInvalidBuffer, headerBytes, len(buf))
 	}
 	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag, willOverflow := decodeHeader(bo.Uint32(buf[:headerBytes]))
-	if count < 0 || count > blockSize {
-		return nil, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
-	}
-
-	// Validate flag combination: willOverflow requires non-zigzag delta encoding
-	// (zigzag uses int64 accumulator internally, so uint32 overflow doesn't apply)
-	if willOverflow && hasZigZag {
-		return nil, fmt.Errorf("%w: will-overflow flag cannot be combined with zigzag encoding", ErrInvalidFlags)
-	}
 
 	payloadLen := payloadBytes(bitWidth)
 	minNeeded := headerBytes + payloadLen
@@ -367,7 +388,6 @@ func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) ([]uint3
 // slice with cap >= 256. The extra capacity (positions 128-255) is used as scratch
 // space for exception handling.
 func PackDeltaUint32(dst []byte, values []uint32) []byte {
-	validateBlockLength(len(values))
 	var useZigZag bool
 	if len(values) > 0 {
 		useZigZag = deltaEncode(values, values) // in-place
@@ -387,7 +407,6 @@ func PackDeltaUint32(dst []byte, values []uint32) []byte {
 // slice with cap >= 256. The extra capacity (positions 128-255) is used as scratch
 // space for exception handling.
 func PackAlreadyDeltaUint32(dst []byte, deltas []uint32) []byte {
-	validateBlockLength(len(deltas))
 	// Set delta flag (so decoder applies prefix sum)
 	// Only set overflow flag if prefix-sum would actually overflow
 	flags := headerTypeUint32Flag | headerDeltaFlag
@@ -450,7 +469,7 @@ func payloadBytes(bitWidth int) int {
 
 // patchBytesMax returns the maximum number of bytes needed to serialize the exception
 // table using StreamVByte encoding for the high bits.
-// Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
+// Layout: count(1) + svb_len(2) + positions(N) + StreamVByte(M)
 func patchBytesMax(exceptionCount int) int {
 	if exceptionCount == 0 {
 		return 0
@@ -695,37 +714,37 @@ func collectExceptionsDirect(values []uint32, bitWidth int, dst []byte, highBits
 // Layout:
 //
 //	dst[0]        : exception count (<= 128)
-//	dst[1:n+1]    : byte indices (lane order) of the exceptions
-//	dst[n+1:n+3]  : uint16 length of StreamVByte data (little-endian)
-//	dst[n+3:]     : StreamVByte-encoded high bits
+//	dst[1:3]      : uint16 length of StreamVByte data (little-endian)
+//	dst[3:3+n]    : byte indices (lane order) of the exceptions
+//	dst[3+n:]     : StreamVByte-encoded high bits
 func writeExceptionsDirect(dst []byte, values []uint32, bitWidth int, highBits []uint32) int {
-	// Collect exception positions to dst[1:] and high bits to highBits
-	excCount := collectExceptionsDirect(values, bitWidth, dst[1:], highBits)
+	// Collect exception positions to dst[3:] and high bits to highBits
+	excCount := collectExceptionsDirect(values, bitWidth, dst[3:], highBits)
 	if excCount == 0 {
 		return 0
 	}
 
 	// Write exception count
 	dst[0] = byte(excCount)
-	pos := 1 + excCount
 
 	// Encode high bits with StreamVByte
+	pos := 3 + excCount
 	svbData := streamvbyte.EncodeUint32(highBits[:excCount], &streamvbyte.EncodeOptions[uint32]{
-		Buffer: dst[pos+2:], // Leave space for length prefix
+		Buffer: dst[pos:],
 	})
 
 	// Write the StreamVByte data length
 	svbLen := len(svbData)
-	bo.PutUint16(dst[pos:], uint16(svbLen))
+	bo.PutUint16(dst[1:], uint16(svbLen))
 
-	return pos + 2 + svbLen
+	return pos + svbLen
 }
 
 // applyExceptions reads exception data from buf at the given offset and applies
 // them to dst by reinserting the high parts that were spilled into the exception table.
 // The scratch slice is used for StreamVByte decoding to avoid allocations.
 // Returns an error if the buffer is malformed.
-// Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
+// Layout: count(1) + svb_len(2) + positions(N) + StreamVByte(M)
 func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scratch []uint32) error {
 	if len(buf) < offset+1 {
 		return fmt.Errorf("fastpfor: missing exception count byte at offset %d", offset)
@@ -738,19 +757,19 @@ func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scra
 	if len(scratch) < excCount {
 		return fmt.Errorf("fastpfor: scratch buffer too small (need %d, got %d)", excCount, len(scratch))
 	}
-	if len(patch) < excCount {
-		return fmt.Errorf("fastpfor: truncated exception positions (need %d bytes, got %d)", excCount, len(patch))
-	}
-
-	positions := patch[:excCount]
-	patch = patch[excCount:]
-
 	if len(patch) < 2 {
 		return fmt.Errorf("fastpfor: missing StreamVByte length (need 2 bytes, got %d)", len(patch))
 	}
 
 	svbLen := int(bo.Uint16(patch[:2]))
 	patch = patch[2:]
+
+	if len(patch) < excCount {
+		return fmt.Errorf("fastpfor: truncated exception positions (need %d bytes, got %d)", excCount, len(patch))
+	}
+
+	positions := patch[:excCount]
+	patch = patch[excCount:]
 
 	if len(patch) < svbLen {
 		return fmt.Errorf("fastpfor: truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch))

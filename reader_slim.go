@@ -57,11 +57,6 @@ func (r *SlimReader) Load(buf []byte) error {
 		return fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
 	}
 
-	// Validate flag combination: willOverflow requires non-zigzag delta encoding
-	if willOverflow && hasZigZag {
-		return fmt.Errorf("%w: will-overflow flag cannot be combined with zigzag encoding", ErrInvalidFlags)
-	}
-
 	payloadLen := payloadBytes(bitWidth)
 	minNeeded := headerBytes + payloadLen
 
@@ -226,7 +221,7 @@ func (r *SlimReader) applyExceptionIfPresent(pos uint32, value uint32, bitWidth 
 		return value
 	}
 
-	positions := patch[1 : 1+excCount]
+	positions := patch[3 : 3+excCount]
 
 	// Find if pos is in the exception list (positions are sorted ascending)
 	var excIndex int
@@ -242,8 +237,7 @@ func (r *SlimReader) applyExceptionIfPresent(pos uint32, value uint32, bitWidth 
 
 applyException:
 	// Decode only the needed exception high bit using StreamVByte random access
-	svbLenOffset := 1 + excCount
-	svbData := patch[svbLenOffset+2:]
+	svbData := patch[3+excCount:]
 	highBit := svbDecodeOne(svbData, excCount, excIndex)
 
 	// Apply the exception

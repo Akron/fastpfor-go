@@ -78,6 +78,9 @@ types:
       - id: count
         type: u1
         doc: Number of exceptions.
+      - id: svb_len
+        type: u2
+        doc: Length of StreamVByte data in bytes.
       - id: positions
         type: u1
         repeat: expr
@@ -85,6 +88,7 @@ types:
         doc: Indices of the exceptions in the original block (0-127).
       - id: values
         type: streamvbyte(count)
+        size: svb_len
         doc: High bits of the exception values, encoded using StreamVByte.
 
 
