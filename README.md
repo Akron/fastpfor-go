@@ -33,7 +33,7 @@ func main() {
     encoded := fastpfor.PackUint32(nil, values)
     fmt.Printf("Compressed %d integers into %d bytes\n", len(values), len(encoded))
 
-    // Decompress
+    // Decompress (automatic scratch buffer management)
     decoded, err := fastpfor.UnpackUint32(nil, encoded)
     if err != nil {
         panic(err)
@@ -41,6 +41,20 @@ func main() {
     fmt.Println("Decoded:", decoded)
 }
 ```
+
+### Performance Optimization
+
+For high-throughput applications with thousands of repeated unpack operations pass a separate scratch buffer:
+
+```
+scratch := make([]uint32, 128) // Allocate once, reuse across calls
+decoded, err = fastpfor.UnpackUint32WithBuffer(nil, scratch, encoded)
+if err != nil {
+    panic(err)
+}
+```
+
+
 
 For sorted data, use delta encoding for better compression:
 
@@ -61,7 +75,7 @@ Reuse buffers to avoid allocations in hot paths:
 
 ```go
 encodeBuf := make([]byte, 0, fastpfor.MaxBlockSizeUint32())
-decodeBuf := make([]uint32, 0, 256)
+decodeBuf := make([]uint32, 0, 128)
 
 for _, block := range blocks {
     encoded := fastpfor.PackUint32(encodeBuf[:0], block)

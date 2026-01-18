@@ -3,9 +3,13 @@
 // The codec operates on fixed blocks of up to 128 unsigned 32-bit integers.
 // Each block begins with a 32-bit header describing the bit width of the packed
 // lane sets followed by the interleaved payload (4 SIMD-friendly lanes) and a
-// patch area for exception values. Callers provide the destination slices to
-// PackUint32/UnpackUint32 so higher-level codecs can reuse buffers without repeated heap
-// allocations. The package maintains no global mutable state.
+// patch area for exception values.
+//
+// For most use cases, use PackUint32 and UnpackUint32 which automatically manage
+// scratch buffers. For maximum performance in high-throughput scenarios, use
+// UnpackUint32WithBuffer with a reused scratch buffer to avoid any allocation overhead.
+//
+// The package maintains no global mutable state.
 package fastpfor
 
 import (
@@ -191,7 +195,7 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 		} else {
 			highBits = make([]uint32, excCount)
 		}
-		actualPatchLen = writeExceptionsDirect(dst[payloadEnd:], values[:len(values)], bitWidth, highBits)
+		actualPatchLen = writeExceptionsDirect(dst[payloadEnd:], values, bitWidth, highBits)
 	}
 
 	// Trim to actual size
@@ -200,7 +204,10 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 }
 
 // UnpackUint32 decodes a PackUint32-produced buffer back into uint32 values, writing into
-// the supplied dst slice (which will be resized as needed).
+// the supplied dst slice (which will be resized as needed). This function uses a
+// stack-allocated scratch buffer for exception handling, providing zero allocations
+// without requiring extra capacity on dst.
+//
 // If the data was delta-encoded (via PackDeltaUint32 or PackAlreadyDeltaUint32), it is automatically delta-decoded.
 //
 // Returns an error if the buffer is invalid. For blocks packed with PackAlreadyDeltaUint32
@@ -213,9 +220,6 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 //	    // Handle overflow at overflow.Position
 //	}
 //
-// For zero-allocation operation, provide a dst slice with cap >= 256. The extra capacity
-// (positions 128-255) is used as scratch space for exception handling and will not appear
-// in the returned slice.
 func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 	if len(buf) < headerBytes {
 		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
@@ -247,17 +251,91 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 		return dst[:0], nil
 	}
 
-	// Ensure capacity for both values and scratch space (2*blockSize = 256)
-	dst = ensureUint32Cap(dst, count, 2*blockSize)
+	// Ensure capacity for the output values
+	dst = ensureUint32Cap(dst, count, blockSize)
 	if bitWidth == 0 {
 		clear(dst[:count])
 	} else {
 		unpackLanes(dst[:count], buf[headerBytes:minNeeded], count, bitWidth)
 	}
 
-	// Handle exceptions (StreamVByte format), using dst[blockSize:] as scratch
+	// Handle exceptions (StreamVByte format), using a stack scratch buffer
 	if hasExceptions {
-		scratch := dst[blockSize : 2*blockSize]
+		var scratch [blockSize]uint32
+		if err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch[:]); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
+		}
+	}
+
+	// Apply delta decoding if the data was delta-encoded
+	if hasDelta && count > 0 {
+		if willOverflow {
+			// Overflow-detecting path for PackAlreadyDeltaUint32 blocks
+			overflowPos := deltaDecodeWithOverflow(dst[:count], dst[:count], hasZigZag)
+			if overflowPos > 0 {
+				return dst[:count], &ErrOverflow{Position: overflowPos}
+			}
+			return dst[:count], nil
+		}
+		// Fast path for PackDeltaUint32 blocks (no overflow possible)
+		deltaDecode(dst[:count], dst[:count], hasZigZag)
+	}
+
+	return dst[:count], nil
+}
+
+// UnpackUint32WithBuffer decodes a PackUint32-produced buffer back into uint32 values,
+// writing into the supplied dst slice. This function accepts a caller-provided scratch
+// buffer for exception handling, offering maximum performance by avoiding stack allocation
+// overhead in tight loops.
+//
+// The scratch buffer must have cap(scratch) >= 128. For optimal performance, reuse the
+// same scratch buffer across multiple calls.
+func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) ([]uint32, error) {
+	if cap(scratch) < blockSize {
+		return nil, fmt.Errorf("fastpfor: scratch capacity too small (need %d, got %d)", blockSize, cap(scratch))
+	}
+	if len(buf) < headerBytes {
+		return nil, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
+			ErrInvalidBuffer, headerBytes, len(buf))
+	}
+	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag, willOverflow := decodeHeader(bo.Uint32(buf[:headerBytes]))
+	if count < 0 || count > blockSize {
+		return nil, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
+	}
+
+	// Validate flag combination: willOverflow requires non-zigzag delta encoding
+	// (zigzag uses int64 accumulator internally, so uint32 overflow doesn't apply)
+	if willOverflow && hasZigZag {
+		return nil, fmt.Errorf("%w: will-overflow flag cannot be combined with zigzag encoding", ErrInvalidFlags)
+	}
+
+	payloadLen := payloadBytes(bitWidth)
+	minNeeded := headerBytes + payloadLen
+	if len(buf) < minNeeded {
+		return nil, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
+			ErrInvalidBuffer, minNeeded, len(buf))
+	}
+
+	// Handle empty case without allocation
+	if count == 0 {
+		if dst == nil {
+			return nil, nil
+		}
+		return dst[:0], nil
+	}
+
+	// Ensure capacity for the output values
+	dst = ensureUint32Cap(dst, count, blockSize)
+	if bitWidth == 0 {
+		clear(dst[:count])
+	} else {
+		unpackLanes(dst[:count], buf[headerBytes:minNeeded], count, bitWidth)
+	}
+
+	// Handle exceptions (StreamVByte format), using caller-provided scratch buffer
+	if hasExceptions {
+		scratch = scratch[:blockSize]
 		if err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
 		}
@@ -345,8 +423,7 @@ func validateBlockLength(n int) {
 }
 
 // ensureUint32Cap ensures the destination slice has at least minCap capacity
-// and returns it with length n. For zero-allocation operation, pass a slice
-// with cap >= 2*blockSize (256) to provide scratch space for exception handling.
+// and returns it with length n.
 func ensureUint32Cap(dst []uint32, n, minCap int) []uint32 {
 	if cap(dst) >= minCap {
 		return dst[:n]
@@ -658,6 +735,9 @@ func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scra
 	excCount := int(patch[0])
 	patch = patch[1:]
 
+	if len(scratch) < excCount {
+		return fmt.Errorf("fastpfor: scratch buffer too small (need %d, got %d)", excCount, len(scratch))
+	}
 	if len(patch) < excCount {
 		return fmt.Errorf("fastpfor: truncated exception positions (need %d bytes, got %d)", excCount, len(patch))
 	}

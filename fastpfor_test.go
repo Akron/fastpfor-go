@@ -786,6 +786,55 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 	})
 }
 
+// TestUnpackUint32WithBuffer validates the caller-provided scratch buffer path.
+func TestUnpackUint32WithBuffer(t *testing.T) {
+	assert := assert.New(t)
+
+	// Test with data that triggers exceptions
+	data := genDataWithSmallExceptions()
+	buf := PackUint32(nil, data)
+
+	dst := make([]uint32, 0, blockSize)
+	scratch := make([]uint32, blockSize)
+
+	result, err := UnpackUint32WithBuffer(dst, scratch, buf)
+	assert.NoError(err)
+	assert.Equal(data, result)
+
+	// Test with no exceptions
+	data2 := genSequential(blockSize)
+	buf2 := PackUint32(nil, data2)
+
+	dst2 := make([]uint32, 0, blockSize)
+	scratch2 := make([]uint32, blockSize)
+
+	result2, err := UnpackUint32WithBuffer(dst2, scratch2, buf2)
+	assert.NoError(err)
+	assert.Equal(data2, result2)
+
+	// Test empty
+	buf3 := PackUint32(nil, nil)
+	scratch3 := make([]uint32, blockSize)
+
+	result3, err := UnpackUint32WithBuffer(nil, scratch3, buf3)
+	assert.NoError(err)
+	assert.Nil(result3)
+}
+
+// TestUnpackUint32WithBufferErrors covers invalid scratch buffers.
+func TestUnpackUint32WithBufferErrors(t *testing.T) {
+	assert := assert.New(t)
+
+	validBuf := PackUint32(nil, genSequential(blockSize))
+
+	// Test insufficient scratch capacity
+	dst := make([]uint32, 0, blockSize)
+	scratch := make([]uint32, 64) // Too small
+	_, err := UnpackUint32WithBuffer(dst, scratch, validBuf)
+	assert.Error(err)
+	assert.Contains(err.Error(), "scratch capacity too small")
+}
+
 // buildExceptionBuf creates a properly formatted exception buffer for testing.
 // Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
 func buildExceptionBuf(positions []byte, highBits []uint32) []byte {
@@ -1709,6 +1758,101 @@ func BenchmarkUnpackWithLargeExceptions(b *testing.B) {
 		dst, _ = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
+}
+
+// BenchmarkUnpackStackVsHeapBuffer compares stack allocation vs heap buffer reuse.
+func BenchmarkUnpackStackVsHeapBuffer(b *testing.B) {
+	b.Run("WithExceptions", func(b *testing.B) {
+		data := genDataWithSmallExceptions()
+		buf := PackUint32(nil, data)
+
+		b.Run("StackAllocated", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				dst, err = UnpackUint32(dst[:0], buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferReuse", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			scratch := make([]uint32, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				dst, err = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferFresh", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				scratch := make([]uint32, blockSize)
+				var err error
+				dst, err = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			resultU32 = dst
+		})
+	})
+
+	b.Run("NoExceptions", func(b *testing.B) {
+		data := genSequential(blockSize)
+		buf := PackUint32(nil, data)
+
+		b.Run("StackAllocated", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				dst, err = UnpackUint32(dst[:0], buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferReuse", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			scratch := make([]uint32, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				dst, err = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferFresh", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				scratch := make([]uint32, blockSize)
+				var err error
+				dst, err = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			resultU32 = dst
+		})
+	})
 }
 
 // ----------------------------------------------------------------------------
