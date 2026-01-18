@@ -666,8 +666,9 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 		// Encode high bits using StreamVByte
 		highBits := []uint32{5, 2}
 		svbData := encodeHighBitsForTest(highBits)
+		scratch := make([]uint32, 4) // Provide scratch buffer
 
-		applyExceptions(dst, positions, svbData, len(positions), 3)
+		applyExceptions(dst, scratch, positions, svbData, len(positions), 3)
 
 		assert.Equal(uint32(2)|(5<<3), dst[1], "unexpected patch at index 1")
 		assert.Equal(uint32(4)|(2<<3), dst[3], "unexpected patch at index 3")
@@ -677,9 +678,10 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 		dst := make([]uint32, 4)
 		positions := []byte{byte(len(dst))}
 		svbData := encodeHighBitsForTest([]uint32{1})
+		scratch := make([]uint32, 4)
 		assert.PanicsWithValue(
 			fmt.Sprintf("fastpfor: exception index %d out of range (max %d)", len(dst), len(dst)-1),
-			func() { applyExceptions(dst, positions, svbData, 1, 5) },
+			func() { applyExceptions(dst, scratch, positions, svbData, 1, 5) },
 		)
 	})
 }
@@ -1177,9 +1179,11 @@ func FuzzSIMDScalarByteCompatibility(f *testing.F) {
 	})
 }
 
+
 var (
 	resultBytes []byte
 	resultU32   []uint32
+	resultInt   int
 )
 
 func BenchmarkPackUint32(b *testing.B) {
@@ -1201,6 +1205,7 @@ func BenchmarkUnpackUint32(b *testing.B) {
 	}
 	resultU32 = dst
 }
+
 
 func BenchmarkPackDeltaUint32(b *testing.B) {
 	source := genMonotonic(blockSize)
@@ -1270,6 +1275,7 @@ func BenchmarkUnpackWithExceptions(b *testing.B) {
 	resultU32 = dst
 }
 
+
 // BenchmarkPackWithLargeExceptions measures encoding with large exception high bits.
 func BenchmarkPackWithLargeExceptions(b *testing.B) {
 	data := genDataWithLargeExceptions()
@@ -1290,6 +1296,128 @@ func BenchmarkUnpackWithLargeExceptions(b *testing.B) {
 		dst = UnpackUint32(dst[:0], buf)
 	}
 	resultU32 = dst
+}
+
+// BenchmarkUnpackStackVsHeapBuffer compares stack allocation vs heap buffer reuse
+func BenchmarkUnpackStackVsHeapBuffer(b *testing.B) {
+	b.Run("WithExceptions", func(b *testing.B) {
+		// Test data that triggers exceptions (where scratch buffer is used)
+		data := genDataWithSmallExceptions()
+		buf := PackUint32(nil, data)
+
+		b.Run("StackAllocated", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				dst = UnpackUint32(dst[:0], buf)
+			}
+			resultU32 = dst
+		})
+
+			b.Run("HeapBufferReuse", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			scratch := make([]uint32, blockSize) // Heap-allocated, reused
+			b.ReportAllocs()
+			for range b.N {
+				dst = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferFresh", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				// Fresh heap allocation each time for scratch buffer
+				scratch := make([]uint32, blockSize)
+				dst = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+			}
+			resultU32 = dst
+		})
+	})
+
+	b.Run("NoExceptions", func(b *testing.B) {
+		// Test data with no exceptions (where no scratch buffer is needed)
+		data := genSequential(blockSize)
+		buf := PackUint32(nil, data)
+
+		b.Run("StackAllocated", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				dst = UnpackUint32(dst[:0], buf)
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferReuse", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			scratch := make([]uint32, blockSize) // Heap-allocated, reused
+			b.ReportAllocs()
+			for range b.N {
+				dst = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+			}
+			resultU32 = dst
+		})
+
+		b.Run("HeapBufferFresh", func(b *testing.B) {
+			dst := make([]uint32, 0, blockSize)
+			b.ReportAllocs()
+			for range b.N {
+				// Fresh heap allocation each time for scratch buffer
+				scratch := make([]uint32, blockSize)
+				dst = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+			}
+			resultU32 = dst
+		})
+	})
+}
+
+// TestUnpackUint32WithBuffer tests the buffer-passing variant
+func TestUnpackUint32WithBuffer(t *testing.T) {
+	assert := assert.New(t)
+
+	// Test with data that triggers exceptions
+	data := genDataWithSmallExceptions()
+	buf := PackUint32(nil, data)
+
+	dst := make([]uint32, 0, blockSize)
+	scratch := make([]uint32, blockSize)
+
+	result := UnpackUint32WithBuffer(dst, scratch, buf)
+	assert.Equal(data, result)
+
+	// Test with no exceptions
+	data2 := genSequential(blockSize)
+	buf2 := PackUint32(nil, data2)
+
+	dst2 := make([]uint32, 0, blockSize)
+	scratch2 := make([]uint32, blockSize)
+
+	result2 := UnpackUint32WithBuffer(dst2, scratch2, buf2)
+	assert.Equal(data2, result2)
+
+	// Test empty
+	buf3 := PackUint32(nil, nil)
+	dst3 := make([]uint32, 0, blockSize)
+	scratch3 := make([]uint32, blockSize)
+
+	result3 := UnpackUint32WithBuffer(dst3, scratch3, buf3)
+	assert.Equal([]uint32{}, result3)
+}
+
+// TestUnpackUint32WithBufferErrors tests error conditions
+func TestUnpackUint32WithBufferErrors(t *testing.T) {
+	assert := assert.New(t)
+
+	validBuf := PackUint32(nil, genSequential(blockSize))
+
+	// Test insufficient scratch capacity
+	dst := make([]uint32, 0, blockSize)
+	scratch := make([]uint32, 64) // Too small
+	assert.Panics(func() {
+		UnpackUint32WithBuffer(dst, scratch, validBuf)
+	})
 }
 
 // ----------------------------------------------------------------------------

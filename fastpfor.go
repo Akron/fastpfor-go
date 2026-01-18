@@ -3,9 +3,13 @@
 // The codec operates on fixed blocks of up to 128 unsigned 32-bit integers.
 // Each block begins with a 32-bit header describing the bit width of the packed
 // lane sets followed by the interleaved payload (4 SIMD-friendly lanes) and a
-// patch area for exception values. Callers provide the destination slices to
-// PackUint32/UnpackUint32 so higher-level codecs can reuse buffers without repeated heap
-// allocations. The package maintains no global mutable state.
+// patch area for exception values.
+//
+// For most use cases, use PackUint32 and UnpackUint32 which automatically manage
+// scratch buffers. For maximum performance in high-throughput scenarios, use
+// UnpackUint32WithBuffer with a reused scratch buffer to avoid any allocation overhead.
+//
+// The package maintains no global mutable state.
 package fastpfor
 
 import (
@@ -150,11 +154,14 @@ func packInternal(dst []byte, values []uint32, extraFlags uint32) []byte {
 }
 
 // UnpackUint32 decodes a PackUint32-produced buffer back into uint32 values, writing into
-// the supplied dst slice (which will be resized as needed).
+// the supplied dst slice (which will be resized as needed). This function uses a stack-allocated
+// scratch buffer for exception handling, providing zero allocations but slightly slower
+// performance compared to UnpackUint32WithBuffer.
 func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 	if len(buf) < headerBytes {
 		panic(fmt.Sprintf("fastpfor: UnpackUint32 buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
 	}
+
 	count, bitWidth, hasExceptions, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
 	validateBlockLength(count)
 
@@ -164,12 +171,22 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 		panic(fmt.Sprintf("fastpfor: buffer truncated: need %d bytes, have %d", minNeeded, len(buf)))
 	}
 
-	dst = ensureUint32Len(dst, count)
+	// Track if dst was originally nil for empty result semantics
+	dstWasNil := dst == nil
+
+	// Ensure dst has capacity for a full block
+	dst = ensureUint32Cap(dst, blockSize)
+
 	if count == 0 {
+		// Preserve nil semantics for empty results when original dst was nil
+		if dstWasNil {
+			return nil
+		}
 		return dst[:0]
 	}
+
 	if bitWidth == 0 {
-		clear(dst)
+		clear(dst[:count])
 	} else {
 		unpackLanes(dst[:count], buf[headerBytes:minNeeded], count, bitWidth)
 	}
@@ -200,10 +217,88 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 		if len(patch) < svbLen {
 			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
 		}
-		applyExceptions(dst[:count], positions, patch[:svbLen], excCount, bitWidth)
+
+		// Use stack-allocated scratch buffer for StreamVByte decoding
+		var scratch [blockSize]uint32
+		applyExceptions(dst[:count], scratch[:], positions, patch[:svbLen], excCount, bitWidth)
 	}
 
-	return dst
+	return dst[:count]
+}
+
+// UnpackUint32WithBuffer decodes a PackUint32-produced buffer back into uint32 values,
+// writing into the supplied dst slice. This function accepts a caller-provided scratch buffer
+// for exception handling, offering maximum performance by avoiding stack allocation overhead.
+//
+// The scratch buffer must have cap(scratch) >= 128. For optimal performance, reuse the same
+// scratch buffer across multiple calls. This function provides the fastest possible unpacking
+// at the cost of requiring buffer management.
+func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) []uint32 {
+	if cap(scratch) < blockSize {
+		panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer scratch capacity too small (need %d, got %d)", blockSize, cap(scratch)))
+	}
+	if len(buf) < headerBytes {
+		panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer buffer too small for header (need %d bytes, got %d)", headerBytes, len(buf)))
+	}
+
+	count, bitWidth, hasExceptions, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
+	validateBlockLength(count)
+
+	payloadLen := payloadBytes(bitWidth)
+	minNeeded := headerBytes + payloadLen
+	if len(buf) < minNeeded {
+		panic(fmt.Sprintf("fastpfor: buffer truncated: need %d bytes, have %d", minNeeded, len(buf)))
+	}
+
+	// Track if dst was originally nil for empty result semantics
+	dstWasNil := dst == nil
+
+	// Ensure dst has capacity for a full block
+	dst = ensureUint32Cap(dst, blockSize)
+
+	if count == 0 {
+		// Preserve nil semantics for empty results when original dst was nil
+		if dstWasNil {
+			return nil
+		}
+		return dst[:0]
+	}
+
+	if bitWidth == 0 {
+		clear(dst[:count])
+	} else {
+		unpackLanes(dst[:count], buf[headerBytes:minNeeded], count, bitWidth)
+	}
+
+	// Handle exceptions (StreamVByte format) using caller-provided scratch buffer
+	if hasExceptions {
+		if len(buf) < minNeeded+1 {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer missing exception count byte at offset %d", minNeeded))
+		}
+		patch := buf[minNeeded:]
+		excCount := int(patch[0])
+
+		patch = patch[1:]
+		if len(patch) < excCount {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
+		}
+		positions := patch[:excCount]
+		patch = patch[excCount:]
+
+		if len(patch) < 2 {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer missing StreamVByte length (need 2 bytes, got %d)", len(patch)))
+		}
+		svbLen := int(bo.Uint16(patch[:2]))
+		patch = patch[2:]
+
+		if len(patch) < svbLen {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
+		}
+
+		applyExceptions(dst[:count], scratch, positions, patch[:svbLen], excCount, bitWidth)
+	}
+
+	return dst[:count]
 }
 
 // PackDeltaUint32 delta-encodes values in-place prior to calling PackUint32.
@@ -249,10 +344,10 @@ func validateBlockLength(n int) {
 	}
 }
 
-// ensureUint32Len ensures the destination slice has at least n uint32 elements.
-func ensureUint32Len(dst []uint32, n int) []uint32 {
+// ensureUint32Cap ensures the slice has at least the given capacity.
+func ensureUint32Cap(dst []uint32, n int) []uint32 {
 	if cap(dst) >= n {
-		return dst[:n]
+		return dst[:cap(dst)]
 	}
 	return make([]uint32, n)
 }
@@ -570,16 +665,15 @@ func writeExceptions(dst []byte, exceptions []exception) int {
 // applyExceptions patches the unpacked values by reinserting the high parts
 // that were spilled into the exception table. This matches the logic in
 // FastPFOR where the truncated packed values are OR'ed with (high << width).
-// The values slice contains StreamVByte-encoded high bits.
-func applyExceptions(dst []uint32, positions []byte, svbData []byte, excCount, bitWidth int) {
-	// Decode high bits from StreamVByte
-	highBits := streamvbyte.DecodeUint32(svbData, excCount, nil)
+// Uses the provided scratch buffer for StreamVByte decoding to avoid allocations.
+func applyExceptions(dst []uint32, scratch []uint32, positions []byte, svbData []byte, excCount, bitWidth int) {
+	// Decode high bits from StreamVByte using scratch buffer
+	highBits := streamvbyte.DecodeUint32(svbData, excCount, &streamvbyte.DecodeOptions[uint32]{Buffer: scratch})
 
 	for i, idx := range positions {
 		if int(idx) >= len(dst) {
 			panic(fmt.Sprintf("fastpfor: exception index %d out of range (max %d)", int(idx), len(dst)-1))
 		}
-		// OR the high bits of the exception value into the unpacked value at the specified index
 		dst[int(idx)] |= highBits[i] << bitWidth
 	}
 }
