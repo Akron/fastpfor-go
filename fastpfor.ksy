@@ -68,16 +68,22 @@ types:
         doc: Words from lane 0, 1, 2, 3 respectively.
 
   exceptions:
+    doc: |
+      Exception data
     seq:
       - id: count
         type: u1
         doc: Number of exceptions.
+      - id: svb_len
+        type: u2
+        doc: Length of StreamVByte-encoded data in bytes.
       - id: positions
         type: u1
         repeat: expr
         repeat-expr: count
         doc: Indices of the exceptions in the original block (0-127).
       - id: values
+        size: svb_len
         type: streamvbyte(count)
         doc: High bits of the exception values, encoded using StreamVByte.
 

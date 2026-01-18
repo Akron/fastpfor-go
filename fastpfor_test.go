@@ -1420,6 +1420,49 @@ func TestUnpackUint32WithBufferErrors(t *testing.T) {
 	})
 }
 
+// TestBlockLength tests the BlockLength function
+func TestBlockLength(t *testing.T) {
+	assert := assert.New(t)
+
+	// Test with sequential data (no exceptions)
+	data1 := genSequential(blockSize)
+	buf1 := PackUint32(nil, data1)
+	expectedLen1 := uint16(len(buf1))
+	actualLen1 := BlockLength(buf1)
+	assert.Equal(expectedLen1, actualLen1, "BlockLength should match actual buffer length for no exceptions")
+
+	// Test with partial buffer (should still work if header is complete)
+	partialBuf1 := buf1[:headerBytes]
+	lenFromHeader := BlockLength(partialBuf1)
+	assert.Equal(expectedLen1, lenFromHeader, "BlockLength should work with just header for no exceptions")
+
+	// Test with data that has exceptions - should work with just header + 3 exception bytes
+	data2 := genDataWithSmallExceptions()
+	buf2 := PackUint32(nil, data2)
+	expectedLen2 := uint16(len(buf2))
+	actualLen2 := BlockLength(buf2)
+	assert.Equal(expectedLen2, actualLen2, "BlockLength should match actual buffer length for exceptions")
+
+	// Test that BlockLength works with minimal data for exceptions
+	payloadLen := payloadBytes(0) // Assume bitWidth 0 for simplicity
+	minExceptionBuf := buf2[:headerBytes+payloadLen+3] // header + payload + count(1) + svb_len(2)
+	lenFromMinimal := BlockLength(minExceptionBuf)
+	assert.Equal(expectedLen2, lenFromMinimal, "BlockLength should work with minimal exception header")
+
+	// Test with empty buffer
+	emptyLen := BlockLength([]byte{})
+	assert.Equal(uint16(0), emptyLen, "BlockLength should return 0 for empty buffer")
+
+	// Test with incomplete header
+	shortLen := BlockLength([]byte{1, 2, 3})
+	assert.Equal(uint16(0), shortLen, "BlockLength should return 0 for incomplete header")
+
+	// Test with empty block
+	emptyBuf := PackUint32(nil, []uint32{})
+	emptyBlockLen := BlockLength(emptyBuf)
+	assert.Equal(uint16(headerBytes), emptyBlockLen, "Empty block should have just header length")
+}
+
 // ----------------------------------------------------------------------------
 // Helper functions for generating test data
 // ----------------------------------------------------------------------------
@@ -1619,22 +1662,24 @@ func assertValidEncoding(t *testing.T, buf []byte) {
 		}
 		return
 	}
-	// With StreamVByte format: count(1) + positions(N) + svb_len(2) + svb_data(M)
-	if len(buf) < minLen+1 {
-		t.Fatalf("missing exception count byte")
+	// With StreamVByte format: count(1) + svb_len(2) + positions(N) + svb_data(M)
+	if len(buf) < minLen+3 {
+		t.Fatalf("missing exception header")
 	}
 	excCount := int(buf[minLen])
 	if excCount > blockSize {
 		t.Fatalf("exception count %d exceeds block size", excCount)
 	}
+	// Read StreamVByte length right after count
+	svbLen := int(binary.LittleEndian.Uint16(buf[minLen+1 : minLen+3]))
+
 	// Check minimum size for exception area
-	minExcLen := 1 + excCount + 2 // count + positions + svb_len
+	minExcLen := 1 + 2 + excCount // count + svb_len + positions
 	if len(buf) < minLen+minExcLen {
 		t.Fatalf("exception area too small: got %d, need at least %d", len(buf)-minLen, minExcLen)
 	}
-	// Read StreamVByte length and verify total size
-	svbLen := int(binary.LittleEndian.Uint16(buf[minLen+1+excCount:]))
-	want := minLen + 1 + excCount + 2 + svbLen
+	// Verify total size includes StreamVByte data
+	want := minLen + 1 + 2 + excCount + svbLen
 	if len(buf) != want {
 		t.Fatalf("exception payload mismatch: got %d want %d (count=%d, svbLen=%d)", len(buf), want, excCount, svbLen)
 	}

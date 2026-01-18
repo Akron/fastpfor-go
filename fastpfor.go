@@ -94,6 +94,48 @@ func MaxBlockSizeUint32() int {
 	return headerBytes + (blockSize * 4)
 }
 
+// BlockLength returns the total length of a FastPFOR block in bytes, including header,
+// payload, and exception data. This can be used to quickly skip to the next block
+// without fully unpacking the current one.
+//
+// Returns 0 if the provider buffer is too small to determine the block length.
+func BlockLength(buf []byte) uint16 {
+	if len(buf) < headerBytes {
+		return 0
+	}
+
+	header := bo.Uint32(buf[:headerBytes])
+	count, bitWidth, hasExceptions, _ := decodeHeader(header)
+
+	// Validate count (should be 0-128)
+	if count > blockSize {
+		return 0
+	}
+
+	payloadLen := payloadBytes(bitWidth)
+	totalLen := uint16(headerBytes + payloadLen)
+
+	if !hasExceptions {
+		return totalLen
+	}
+
+	// For blocks with exceptions, we need to read count + svb_len (3 bytes total)
+	if len(buf) < int(totalLen)+3 {
+		return 0 // Need at least count(1) + svb_len(2)
+	}
+
+	patchStart := int(totalLen)
+	excCount := int(buf[patchStart])
+
+	// Read the StreamVByte length right after count
+	svbLen := int(bo.Uint16(buf[patchStart+1 : patchStart+3]))
+
+	// Exception format: count(1) + svb_len(2) + positions(excCount) + svb_data(svbLen)
+	exceptionLen := 1 + 2 + excCount + svbLen
+	totalLen += uint16(exceptionLen)
+	return totalLen
+}
+
 // exception tracks a single patched integer: its index in the block and the
 // high bits that must be re-applied (OR-ed) after unpacking the truncated value.
 type exception struct {
@@ -193,34 +235,31 @@ func UnpackUint32(dst []uint32, buf []byte) []uint32 {
 
 	// Handle exceptions (StreamVByte format)
 	if hasExceptions {
-		if len(buf) < minNeeded+1 {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing exception count byte at offset %d", minNeeded))
+		if len(buf) < minNeeded+3 {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing exception header at offset %d", minNeeded))
 		}
 		patch := buf[minNeeded:]
-		excCount := int(patch[0]) // Get the number of exceptions <= 128
+		excCount := int(patch[0])
 
-		patch = patch[1:]
-		if len(patch) < excCount {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
-		}
-		// Read positions
-		positions := patch[:excCount]
-		patch = patch[excCount:]
+		// Read StreamVByte length right after count
+		svbLen := int(bo.Uint16(patch[1:3]))
 
-		// Read StreamVByte data length
-		if len(patch) < 2 {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 missing StreamVByte length (need 2 bytes, got %d)", len(patch)))
+		// Positions start after count + svb_len
+		if len(patch) < 3+excCount {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated exception positions (need %d bytes, got %d)", 3+excCount, len(patch)))
 		}
-		svbLen := int(bo.Uint16(patch[:2]))
-		patch = patch[2:]
+		positions := patch[3 : 3+excCount]
 
-		if len(patch) < svbLen {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
+		// StreamVByte data starts after positions
+		svbStart := 3 + excCount
+		if len(patch) < svbStart+svbLen {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32 truncated StreamVByte data (need %d bytes, got %d)", svbStart+svbLen, len(patch)))
 		}
+		svbData := patch[svbStart : svbStart+svbLen]
 
 		// Use stack-allocated scratch buffer for StreamVByte decoding
 		var scratch [blockSize]uint32
-		applyExceptions(dst[:count], scratch[:], positions, patch[:svbLen], excCount, bitWidth)
+		applyExceptions(dst[:count], scratch[:], positions, svbData, excCount, bitWidth)
 	}
 
 	return dst[:count]
@@ -272,30 +311,29 @@ func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) []uint32
 
 	// Handle exceptions (StreamVByte format) using caller-provided scratch buffer
 	if hasExceptions {
-		if len(buf) < minNeeded+1 {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer missing exception count byte at offset %d", minNeeded))
+		if len(buf) < minNeeded+3 {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer missing exception header at offset %d", minNeeded))
 		}
 		patch := buf[minNeeded:]
 		excCount := int(patch[0])
 
-		patch = patch[1:]
-		if len(patch) < excCount {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer truncated exception positions (need %d bytes, got %d)", excCount, len(patch)))
-		}
-		positions := patch[:excCount]
-		patch = patch[excCount:]
+		// Read StreamVByte length right after count
+		svbLen := int(bo.Uint16(patch[1:3]))
 
-		if len(patch) < 2 {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer missing StreamVByte length (need 2 bytes, got %d)", len(patch)))
+		// Positions start after count + svb_len
+		if len(patch) < 3+excCount {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer truncated exception positions (need %d bytes, got %d)", 3+excCount, len(patch)))
 		}
-		svbLen := int(bo.Uint16(patch[:2]))
-		patch = patch[2:]
+		positions := patch[3 : 3+excCount]
 
-		if len(patch) < svbLen {
-			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch)))
+		// StreamVByte data starts after positions
+		svbStart := 3 + excCount
+		if len(patch) < svbStart+svbLen {
+			panic(fmt.Sprintf("fastpfor: UnpackUint32WithBuffer truncated StreamVByte data (need %d bytes, got %d)", svbStart+svbLen, len(patch)))
 		}
+		svbData := patch[svbStart : svbStart+svbLen]
 
-		applyExceptions(dst[:count], scratch, positions, patch[:svbLen], excCount, bitWidth)
+		applyExceptions(dst[:count], scratch, positions, svbData, excCount, bitWidth)
 	}
 
 	return dst[:count]
@@ -371,7 +409,7 @@ func payloadBytes(bitWidth int) int {
 
 // patchBytesMax returns the maximum number of bytes needed to serialize the exception
 // table using StreamVByte encoding for the high bits.
-// Layout: count(1) + positions(N) + svb_len(2) + StreamVByte(M)
+// Layout: count(1) + svb_len(2) + positions(N) + StreamVByte(M)
 func patchBytesMax(exceptionCount int) int {
 	if exceptionCount == 0 {
 		return 0
@@ -624,12 +662,15 @@ func collectExceptions(values []uint32, bitWidth int, buf []exception) []excepti
 // writeExceptions serializes the exception count, their positions, and the high
 // bits into dst using StreamVByte encoding for the high bits. Returns the actual
 // number of bytes written.
-// Layout:
+// Layout (optimized for fast BlockLength calculation):
 //
 //	dst[0]        : exception count (<= 128)
-//	dst[1:n+1]    : byte indices (lane order) of the exceptions
-//	dst[n+1:n+3]  : uint16 length of StreamVByte data (little-endian)
+//	dst[1:3]      : uint16 length of StreamVByte data (little-endian)
+//	dst[3:n+3]    : byte indices (lane order) of the exceptions
 //	dst[n+3:]     : StreamVByte-encoded high bits
+//
+// This layout allows BlockLength to determine total block size by reading only
+// the first 3 bytes of exception data (count + svb_len).
 func writeExceptions(dst []byte, exceptions []exception) int {
 	if len(exceptions) == 0 {
 		return 0
@@ -637,12 +678,6 @@ func writeExceptions(dst []byte, exceptions []exception) int {
 
 	// Number of exceptions in the block
 	dst[0] = byte(len(exceptions))
-	pos := 1
-	for _, ex := range exceptions {
-		// Index of the exception in the block (always <= 127)
-		dst[pos] = byte(ex.index)
-		pos++
-	}
 
 	// Collect high bits for StreamVByte encoding
 	highBits := make([]uint32, len(exceptions))
@@ -650,16 +685,28 @@ func writeExceptions(dst []byte, exceptions []exception) int {
 		highBits[i] = ex.high
 	}
 
+	// Write positions starting after count + svb_len
+	pos := 3
+	for _, ex := range exceptions {
+		// Index of the exception in the block (always <= 127)
+		dst[pos] = byte(ex.index)
+		pos++
+	}
+
 	// Encode high bits with StreamVByte
+	// Note: This allocates a temporary buffer, but exceptions are rare and data is small
 	svbData := streamvbyte.EncodeUint32(highBits, &streamvbyte.EncodeOptions[uint32]{
 		Buffer: dst[pos+2:], // Leave space for length prefix
 	})
 
-	// Write the StreamVByte data length
+	// Write the StreamVByte data length right after count
 	svbLen := len(svbData)
-	bo.PutUint16(dst[pos:], uint16(svbLen))
+	bo.PutUint16(dst[1:], uint16(svbLen))
 
-	return pos + 2 + svbLen
+	// Copy StreamVByte data after positions
+	copy(dst[pos:], svbData)
+
+	return pos + svbLen
 }
 
 // applyExceptions patches the unpacked values by reinserting the high parts

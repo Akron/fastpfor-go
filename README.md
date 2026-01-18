@@ -65,6 +65,20 @@ decoded := fastpfor.UnpackUint32WithBuffer(nil, scratch, encoded) // ~5-10% fast
 
 Use `UnpackUint32` for simplicity. Use `UnpackUint32WithBuffer` for maximum performance in tight loops.
 
+### Block Navigation
+
+For efficient streaming or random access to blocks:
+
+```go
+// Get block length quickly - optimized format requires minimal parsing:
+// - No exceptions: only 4 bytes (header)
+// - With exceptions: only 7 bytes (header + 3 exception bytes)
+blockLen := fastpfor.BlockLength(buf)
+
+// Skip to next block
+nextBlockStart := currentOffset + uint32(blockLen)
+```
+
 For sorted or time-series data, use delta encoding for better compression:
 
 ```go
@@ -121,10 +135,10 @@ Integer Block
 │   ├── ... (bitWidth blocks total)
 ├── Patch (if exceptionFlag set)
 │   ├── exceptionCount   // 1 Byte
+│   ├── svbLen           // 2 Bytes (little-endian) - placed here for fast BlockLength()
 │   ├── Positions        // (exceptionCount * 1) Bytes
 │   │   ├── pos1         // 1 Byte
 │   │   ├── ... 
-│   ├── svbLen           // 2 Bytes (little-endian)
 │   ├── StreamVByte      // svbLen Bytes (variable-byte encoded high bits)
 ```
 
