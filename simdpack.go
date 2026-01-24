@@ -257,6 +257,34 @@ func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 	inPtr := uintptr(unsafe.Pointer(&valuesBuf[0]))
 	outPtr := &payloadBuf[0]
 
+	// Hot path: Common bit widths (4-12) are most frequent in real data.
+	// This helps branch prediction by checking likely cases first.
+	if bitWidth >= 4 && bitWidth <= 12 {
+		switch bitWidth {
+		case 8:
+			pack32_8(inPtr, outPtr, 0, &zeroSeed)
+		case 4:
+			pack32_4(inPtr, outPtr, 0, &zeroSeed)
+		case 7:
+			pack32_7(inPtr, outPtr, 0, &zeroSeed)
+		case 6:
+			pack32_6(inPtr, outPtr, 0, &zeroSeed)
+		case 5:
+			pack32_5(inPtr, outPtr, 0, &zeroSeed)
+		case 10:
+			pack32_10(inPtr, outPtr, 0, &zeroSeed)
+		case 9:
+			pack32_9(inPtr, outPtr, 0, &zeroSeed)
+		case 11:
+			pack32_11(inPtr, outPtr, 0, &zeroSeed)
+		case 12:
+			pack32_12(inPtr, outPtr, 0, &zeroSeed)
+		}
+		copy(dst[:needed], payloadBuf[:needed])
+		return true
+	}
+
+	// Cold path: Less common bit widths
 	switch bitWidth {
 	case 1:
 		pack32_1(inPtr, outPtr, 0, &zeroSeed)
@@ -264,24 +292,6 @@ func simdPack(dst []byte, values []uint32, bitWidth int) bool {
 		pack32_2(inPtr, outPtr, 0, &zeroSeed)
 	case 3:
 		pack32_3(inPtr, outPtr, 0, &zeroSeed)
-	case 4:
-		pack32_4(inPtr, outPtr, 0, &zeroSeed)
-	case 5:
-		pack32_5(inPtr, outPtr, 0, &zeroSeed)
-	case 6:
-		pack32_6(inPtr, outPtr, 0, &zeroSeed)
-	case 7:
-		pack32_7(inPtr, outPtr, 0, &zeroSeed)
-	case 8:
-		pack32_8(inPtr, outPtr, 0, &zeroSeed)
-	case 9:
-		pack32_9(inPtr, outPtr, 0, &zeroSeed)
-	case 10:
-		pack32_10(inPtr, outPtr, 0, &zeroSeed)
-	case 11:
-		pack32_11(inPtr, outPtr, 0, &zeroSeed)
-	case 12:
-		pack32_12(inPtr, outPtr, 0, &zeroSeed)
 	case 13:
 		pack32_13(inPtr, outPtr, 0, &zeroSeed)
 	case 14:
@@ -339,6 +349,9 @@ func unpackLanesSIMDPreferred(dst []uint32, payload []byte, count, bitWidth int)
 // simdUnpack decodes a SIMD-packed payload into dst (count <= 128).
 // Note: We use a switch instead of a dispatch table to allow the compiler to prove
 // that the stack-allocated buffers don't escape (function pointers break escape analysis).
+//
+// Optimization: When dst is 16-byte aligned and count == blockSize, we unpack directly
+// into dst, avoiding one 512-byte copy operation (Option C from optimization plan).
 func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 	if bitWidth <= 0 || bitWidth > 32 || count < 0 || count > blockSize {
 		return false
@@ -348,15 +361,55 @@ func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 		return false
 	}
 
+	// Copy payload to aligned buffer (required for SIMD alignment)
 	var payloadStorage [maxPayloadBytes + 16]byte
 	payloadBuf := alignedByteSlice(&payloadStorage)
 	copy(payloadBuf[:needed], payload[:needed])
-	var valueStorage [blockSize + 4]uint32
-	valuesBuf := alignedUint32Slice(&valueStorage)
-
 	inPtr := &payloadBuf[0]
-	outPtr := uintptr(unsafe.Pointer(&valuesBuf[0]))
 
+	// Optimization: If dst is aligned and we're unpacking a full block,
+	// write directly to dst to avoid the output copy.
+	var outPtr uintptr
+	var valueStorage [blockSize + 4]uint32
+	var valuesBuf []uint32
+	directWrite := count == blockSize && isAligned16Uint32(&dst[0])
+	if directWrite {
+		outPtr = uintptr(unsafe.Pointer(&dst[0]))
+	} else {
+		valuesBuf = alignedUint32Slice(&valueStorage)
+		outPtr = uintptr(unsafe.Pointer(&valuesBuf[0]))
+	}
+
+	// Hot path: Common bit widths (4-12) are most frequent in real data.
+	// This helps branch prediction by checking likely cases first.
+	if bitWidth >= 4 && bitWidth <= 12 {
+		switch bitWidth {
+		case 8:
+			unpack32_8(inPtr, outPtr, 0, &zeroSeed)
+		case 4:
+			unpack32_4(inPtr, outPtr, 0, &zeroSeed)
+		case 7:
+			unpack32_7(inPtr, outPtr, 0, &zeroSeed)
+		case 6:
+			unpack32_6(inPtr, outPtr, 0, &zeroSeed)
+		case 5:
+			unpack32_5(inPtr, outPtr, 0, &zeroSeed)
+		case 10:
+			unpack32_10(inPtr, outPtr, 0, &zeroSeed)
+		case 9:
+			unpack32_9(inPtr, outPtr, 0, &zeroSeed)
+		case 11:
+			unpack32_11(inPtr, outPtr, 0, &zeroSeed)
+		case 12:
+			unpack32_12(inPtr, outPtr, 0, &zeroSeed)
+		}
+		if !directWrite {
+			copy(dst[:count], valuesBuf[:count])
+		}
+		return true
+	}
+
+	// Cold path: Less common bit widths
 	switch bitWidth {
 	case 1:
 		unpack32_1(inPtr, outPtr, 0, &zeroSeed)
@@ -364,24 +417,6 @@ func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 		unpack32_2(inPtr, outPtr, 0, &zeroSeed)
 	case 3:
 		unpack32_3(inPtr, outPtr, 0, &zeroSeed)
-	case 4:
-		unpack32_4(inPtr, outPtr, 0, &zeroSeed)
-	case 5:
-		unpack32_5(inPtr, outPtr, 0, &zeroSeed)
-	case 6:
-		unpack32_6(inPtr, outPtr, 0, &zeroSeed)
-	case 7:
-		unpack32_7(inPtr, outPtr, 0, &zeroSeed)
-	case 8:
-		unpack32_8(inPtr, outPtr, 0, &zeroSeed)
-	case 9:
-		unpack32_9(inPtr, outPtr, 0, &zeroSeed)
-	case 10:
-		unpack32_10(inPtr, outPtr, 0, &zeroSeed)
-	case 11:
-		unpack32_11(inPtr, outPtr, 0, &zeroSeed)
-	case 12:
-		unpack32_12(inPtr, outPtr, 0, &zeroSeed)
 	case 13:
 		unpack32_13(inPtr, outPtr, 0, &zeroSeed)
 	case 14:
@@ -426,8 +461,15 @@ func simdUnpack(dst []uint32, payload []byte, bitWidth, count int) bool {
 		return false
 	}
 
-	copy(dst[:count], valuesBuf[:count])
+	if !directWrite {
+		copy(dst[:count], valuesBuf[:count])
+	}
 	return true
+}
+
+// isAligned16Uint32 checks if a uint32 pointer is 16-byte aligned.
+func isAligned16Uint32(p *uint32) bool {
+	return uintptr(unsafe.Pointer(p))&15 == 0
 }
 
 func alignedUint32Slice(storage *[blockSize + 4]uint32) []uint32 {

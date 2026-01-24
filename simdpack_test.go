@@ -3,6 +3,7 @@
 package fastpfor
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -315,4 +316,116 @@ func BenchmarkDeltaDecode_Scalar(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		deltaDecodeScalar(dst, deltas, false)
 	}
+}
+
+// ==================== SIMD Optimization Benchmarks ====================
+
+// BenchmarkSIMDUnpack_CommonBitWidths benchmarks unpacking at common bit widths (4-12).
+// These are the "hot path" bit widths that benefit from branch prediction optimization.
+func BenchmarkSIMDUnpack_CommonBitWidths(b *testing.B) {
+	if !IsSIMDavailable() {
+		b.Skip("SIMD disabled")
+	}
+
+	commonWidths := []int{4, 5, 6, 7, 8, 9, 10, 11, 12}
+	for _, bitWidth := range commonWidths {
+		b.Run(fmt.Sprintf("width_%02d", bitWidth), func(b *testing.B) {
+			values := make([]uint32, blockSize)
+			mask := uint32((1 << bitWidth) - 1)
+			for i := range values {
+				values[i] = uint32(i) & mask
+			}
+			payload := make([]byte, bitWidth*16)
+			simdPack(payload, values, bitWidth)
+
+			// Use aligned destination to enable direct write optimization
+			var dstStorage [blockSize + 4]uint32
+			dst := alignedUint32Slice(&dstStorage)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				simdUnpack(dst, payload, bitWidth, blockSize)
+			}
+		})
+	}
+}
+
+// BenchmarkSIMDUnpack_RareBitWidths benchmarks unpacking at less common bit widths.
+// These are the "cold path" bit widths (1-3, 13-32).
+func BenchmarkSIMDUnpack_RareBitWidths(b *testing.B) {
+	if !IsSIMDavailable() {
+		b.Skip("SIMD disabled")
+	}
+
+	rareWidths := []int{1, 2, 3, 16, 24, 32}
+	for _, bitWidth := range rareWidths {
+		b.Run(fmt.Sprintf("width_%02d", bitWidth), func(b *testing.B) {
+			values := make([]uint32, blockSize)
+			var mask uint32 = 0xFFFFFFFF
+			if bitWidth < 32 {
+				mask = (1 << bitWidth) - 1
+			}
+			for i := range values {
+				values[i] = uint32(i) & mask
+			}
+			payload := make([]byte, bitWidth*16)
+			simdPack(payload, values, bitWidth)
+
+			// Use aligned destination to enable direct write optimization
+			var dstStorage [blockSize + 4]uint32
+			dst := alignedUint32Slice(&dstStorage)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				simdUnpack(dst, payload, bitWidth, blockSize)
+			}
+		})
+	}
+}
+
+// BenchmarkSIMDUnpack_AlignedVsUnaligned compares performance with aligned vs unaligned destination.
+func BenchmarkSIMDUnpack_AlignedVsUnaligned(b *testing.B) {
+	if !IsSIMDavailable() {
+		b.Skip("SIMD disabled")
+	}
+
+	const bitWidth = 7
+	values := make([]uint32, blockSize)
+	for i := range values {
+		values[i] = uint32(i) & 0x7F
+	}
+	payload := make([]byte, bitWidth*16)
+	simdPack(payload, values, bitWidth)
+
+	b.Run("AlignedDst", func(b *testing.B) {
+		var dstStorage [blockSize + 4]uint32
+		dst := alignedUint32Slice(&dstStorage)
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			simdUnpack(dst, payload, bitWidth, blockSize)
+		}
+	})
+
+	b.Run("UnalignedDst", func(b *testing.B) {
+		// Create unaligned destination by starting at odd index
+		dstStorage := make([]uint32, blockSize+1)
+		dst := dstStorage[1:] // Likely unaligned
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			simdUnpack(dst, payload, bitWidth, blockSize)
+		}
+	})
+
+	b.Run("PartialBlock", func(b *testing.B) {
+		// Partial block (count < blockSize) always needs output copy
+		var dstStorage [blockSize + 4]uint32
+		dst := alignedUint32Slice(&dstStorage)
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			simdUnpack(dst[:64], payload, bitWidth, 64) // Half block
+		}
+	})
 }
