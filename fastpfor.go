@@ -871,7 +871,7 @@ func deltaDecodeWithOverflowScalar(dst, deltas []uint32, useZigZag bool) uint8 {
 
 // zigzagEncode32 encodes a 32-bit integer as a zigzag integer.
 func zigzagEncode32(v int32) uint32 {
-	return uint32(uint32(v<<1) ^ uint32(v>>31))
+	return uint32(v<<1) ^ uint32(v>>31)
 }
 
 // zigzagDecode32 decodes a zigzag integer back into a 32-bit integer.
