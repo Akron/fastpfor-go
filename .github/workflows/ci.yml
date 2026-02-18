@@ -37,7 +37,7 @@ jobs:
         if: matrix.os != 'windows-latest'
 
       - name: Run tests (Windows, no race detector)
-        run: go test -v -coverprofile=coverage.txt -covermode=atomic ./...
+        run: go test -v ./...
         if: matrix.os == 'windows-latest'
 
       - name: Upload coverage
