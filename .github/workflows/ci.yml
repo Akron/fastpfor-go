@@ -34,12 +34,17 @@ jobs:
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+        if: matrix.os != 'windows-latest'
+
+      - name: Run tests (Windows, no race detector)
+        run: go test -v -coverprofile=coverage.txt -covermode=atomic ./...
+        if: matrix.os == 'windows-latest'
 
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
         uses: codecov/codecov-action@v4
         with:
-          files: coverage.out
+          files: coverage.txt
           fail_ci_if_error: false
 
   test-noasm:
@@ -116,5 +121,5 @@ jobs:
 
       - name: Run fuzz tests (30 seconds each)
         run: |
-          go test -fuzz=FuzzPackRoundTrip -fuzztime=10s ./...
-          go test -fuzz=FuzzPackDeltaRoundTrip -fuzztime=10s ./...
+          go test -fuzz=FuzzPackRoundTrip -fuzztime=10s .
+          go test -fuzz=FuzzPackDeltaRoundTrip -fuzztime=10s .

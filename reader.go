@@ -63,13 +63,11 @@ func (r *Reader) Load(buf []byte) error {
 	if err != nil {
 		var overflowErr *ErrOverflow
 		if errors.As(err, &overflowErr) {
-			err = nil // Overflow is handled, not a fatal error
 			r.overflowPos = overflowErr.Position
 		} else {
 			return err
 		}
 	}
-	// Capture overflow error separately (it's not a fatal error, just informational)
 
 	// Update state
 	r.values = values
