@@ -138,6 +138,16 @@ func MaxBlockSizeUint32() int {
 	return headerBytes + (blockSize * 4)
 }
 
+// blockBytesConsumed computes the total encoded block size.
+// payloadEnd must be headerBytes + payloadBytes(bitWidth).
+// For exception blocks, reads the exception count and StreamVByte length
+// from buf[payloadEnd:]. Caller must have validated that buf is long enough.
+func blockBytesConsumed(buf []byte, payloadEnd int) int {
+	excCount := int(buf[payloadEnd])
+	svbLen := int(bo.Uint16(buf[payloadEnd+1 : payloadEnd+3]))
+	return payloadEnd + 1 + 2 + excCount + svbLen
+}
+
 // BlockLength returns the total number of bytes for a single encoded block.
 // It validates the header and exception metadata without decoding the payload.
 func BlockLength(buf []byte) (int, error) {
@@ -150,25 +160,22 @@ func BlockLength(buf []byte) (int, error) {
 		return 0, fmt.Errorf("%w: invalid element count %d", ErrInvalidBuffer, count)
 	}
 
-	payloadLen := payloadBytes(bitWidth)
-	minNeeded := headerBytes + payloadLen
+	payloadEnd := headerBytes + payloadBytes(bitWidth)
 
 	if !hasExceptions {
-		return minNeeded, nil
+		return payloadEnd, nil
 	}
 
-	minExcMeta := minNeeded + 1 + 2 // count + svb_len
+	minExcMeta := payloadEnd + 1 + 2 // count + svb_len
 	if len(buf) < minExcMeta {
 		return 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
 			ErrInvalidBuffer, minExcMeta, len(buf))
 	}
-	excCount := int(buf[minNeeded]) // positions array size
+	excCount := int(buf[payloadEnd]) // positions array size
 	if excCount > blockSize {
 		return 0, fmt.Errorf("%w: invalid exception count %d", ErrInvalidBuffer, excCount)
 	}
-	svbLen := int(bo.Uint16(buf[minNeeded+1 : minNeeded+3]))
-	total := minNeeded + 1 + 2 + excCount + svbLen
-	return total, nil
+	return blockBytesConsumed(buf, payloadEnd), nil
 }
 
 // PackUint32 encodes up to BlockSize uint32 values into the FastPFOR block format.
@@ -289,7 +296,7 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 	}
 
 	// Apply delta decoding if the data was delta-encoded
-	if hasDelta && count > 0 {
+	if hasDelta {
 		if willOverflow {
 			// Overflow-detecting path for PackAlreadyDeltaUint32 blocks
 			overflowPos := deltaDecodeWithOverflow(dst[:count], dst[:count], hasZigZag)
@@ -354,7 +361,7 @@ func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) ([]uint3
 	}
 
 	// Apply delta decoding if the data was delta-encoded
-	if hasDelta && count > 0 {
+	if hasDelta {
 		if willOverflow {
 			// Overflow-detecting path for PackAlreadyDeltaUint32 blocks
 			overflowPos := deltaDecodeWithOverflow(dst[:count], dst[:count], hasZigZag)
@@ -368,6 +375,86 @@ func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) ([]uint3
 	}
 
 	return dst[:count], nil
+}
+
+// UnpackUint32WithLength decodes a PackUint32-produced buffer back into uint32 values and
+// additionally returns the total number of bytes consumed from buf (equivalent to BlockLength).
+// This avoids a separate BlockLength call when iterating over consecutive blocks.
+//
+// Like UnpackUint32, this function uses a stack-allocated scratch buffer for exception
+// handling.
+//
+// If the data was delta-encoded, it is automatically delta-decoded.
+func UnpackUint32WithLength(dst []uint32, buf []byte) ([]uint32, int, error) {
+	var scratch [blockSize]uint32
+	return UnpackUint32WithBufferAndLength(dst, scratch[:], buf)
+}
+
+// UnpackUint32WithBufferAndLength decodes a PackUint32-produced buffer back into uint32
+// values and additionally returns the total number of bytes consumed from buf (equivalent
+// to BlockLength). This avoids a separate BlockLength call when iterating over consecutive
+// blocks.
+//
+// Like UnpackUint32WithBuffer, this function accepts a caller-provided scratch buffer for
+// exception handling, offering maximum performance in tight loops.
+//
+// The scratch buffer must have cap(scratch) >= 128. For optimal performance, reuse the
+// same scratch buffer across multiple calls.
+func UnpackUint32WithBufferAndLength(dst []uint32, scratch []uint32, buf []byte) ([]uint32, int, error) {
+	if cap(scratch) < blockSize {
+		return nil, 0, fmt.Errorf("fastpfor: scratch capacity too small (need %d, got %d)", blockSize, cap(scratch))
+	}
+
+	if len(buf) < headerBytes {
+		return nil, 0, fmt.Errorf("%w: buffer too small for header (need %d bytes, got %d)",
+			ErrInvalidBuffer, headerBytes, len(buf))
+	}
+	count, bitWidth, _, hasExceptions, hasDelta, hasZigZag, willOverflow := decodeHeader(bo.Uint32(buf[:headerBytes]))
+
+	payloadEnd := headerBytes + payloadBytes(bitWidth)
+	if len(buf) < payloadEnd {
+		return nil, 0, fmt.Errorf("%w: buffer truncated (need %d bytes, got %d)",
+			ErrInvalidBuffer, payloadEnd, len(buf))
+	}
+
+	bytesConsumed := payloadEnd
+	// Handle empty case without allocation.
+	if count == 0 {
+		if dst == nil {
+			return nil, bytesConsumed, nil
+		}
+		return dst[:0], bytesConsumed, nil
+	}
+
+	// Ensure capacity for the output values.
+	dst = ensureUint32Cap(dst, count, blockSize)
+	if bitWidth == 0 {
+		clear(dst[:count])
+	} else {
+		unpackLanes(dst[:count], buf[headerBytes:payloadEnd], count, bitWidth)
+	}
+
+	// Handle exceptions (StreamVByte format).
+	if hasExceptions {
+		bytesConsumed = blockBytesConsumed(buf, payloadEnd)
+		if err := applyExceptions(dst[:count], buf, payloadEnd, count, bitWidth, scratch); err != nil {
+			return nil, 0, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
+		}
+	}
+
+	// Apply delta decoding if the data was delta-encoded.
+	if hasDelta {
+		if willOverflow {
+			overflowPos := deltaDecodeWithOverflow(dst[:count], dst[:count], hasZigZag)
+			if overflowPos > 0 {
+				return dst[:count], bytesConsumed, &ErrOverflow{Position: overflowPos}
+			}
+			return dst[:count], bytesConsumed, nil
+		}
+		deltaDecode(dst[:count], dst[:count], hasZigZag)
+	}
+
+	return dst[:count], bytesConsumed, nil
 }
 
 // PackDeltaUint32 delta-encodes values in-place prior to calling PackUint32.

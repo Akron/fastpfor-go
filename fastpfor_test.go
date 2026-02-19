@@ -871,6 +871,276 @@ func TestUnpackUint32WithBufferErrors(t *testing.T) {
 	assert.Contains(err.Error(), "scratch capacity too small")
 }
 
+// TestUnpackUint32WithLength validates the WithLength variant returns correct values and byte count.
+func TestUnpackUint32WithLength(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("noExceptions", func(t *testing.T) {
+		data := genSequential(blockSize)
+		buf := PackUint32(nil, data)
+
+		result, consumed, err := UnpackUint32WithLength(nil, buf)
+		assert.NoError(err)
+		assert.Equal(data, result)
+		assert.Equal(len(buf), consumed)
+
+		blockLen, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(blockLen, consumed)
+	})
+
+	t.Run("withExceptions", func(t *testing.T) {
+		data := genDataWithSmallExceptions()
+		buf := PackUint32(nil, data)
+
+		result, consumed, err := UnpackUint32WithLength(nil, buf)
+		assert.NoError(err)
+		assert.Equal(data, result)
+		assert.Equal(len(buf), consumed)
+
+		blockLen, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(blockLen, consumed)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		buf := PackUint32(nil, nil)
+
+		result, consumed, err := UnpackUint32WithLength(nil, buf)
+		assert.NoError(err)
+		assert.Nil(result)
+		assert.Equal(len(buf), consumed)
+	})
+
+	t.Run("singleValue", func(t *testing.T) {
+		data := []uint32{42}
+		buf := PackUint32(nil, data)
+
+		result, consumed, err := UnpackUint32WithLength(nil, buf)
+		assert.NoError(err)
+		assert.Equal(data, result)
+		assert.Equal(len(buf), consumed)
+	})
+
+	t.Run("reusesDst", func(t *testing.T) {
+		data := []uint32{5, 6, 7, 8}
+		buf := PackUint32(nil, data)
+		dst := make([]uint32, 2*blockSize)
+
+		out, consumed, err := UnpackUint32WithLength(dst[:0], buf)
+		assert.NoError(err)
+		assert.Equal(data, out)
+		assert.Equal(len(buf), consumed)
+		if len(out) > 0 {
+			assert.Equal(&dst[0], &out[0], "expected to reuse dst backing array")
+		}
+	})
+
+	t.Run("rejectsShortBuffer", func(t *testing.T) {
+		header := encodeHeader(4, 5, 0)
+		buf := make([]byte, headerBytes)
+		binary.LittleEndian.PutUint32(buf, header)
+		_, _, err := UnpackUint32WithLength(nil, buf)
+		assert.ErrorIs(err, ErrInvalidBuffer)
+	})
+}
+
+// TestUnpackUint32WithBufferAndLength validates the WithBufferAndLength variant.
+func TestUnpackUint32WithBufferAndLength(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("withExceptions", func(t *testing.T) {
+		data := genDataWithSmallExceptions()
+		buf := PackUint32(nil, data)
+
+		dst := make([]uint32, 0, blockSize)
+		scratch := make([]uint32, blockSize)
+
+		result, consumed, err := UnpackUint32WithBufferAndLength(dst, scratch, buf)
+		assert.NoError(err)
+		assert.Equal(data, result)
+		assert.Equal(len(buf), consumed)
+
+		blockLen, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(blockLen, consumed)
+	})
+
+	t.Run("noExceptions", func(t *testing.T) {
+		data := genSequential(blockSize)
+		buf := PackUint32(nil, data)
+
+		dst := make([]uint32, 0, blockSize)
+		scratch := make([]uint32, blockSize)
+
+		result, consumed, err := UnpackUint32WithBufferAndLength(dst, scratch, buf)
+		assert.NoError(err)
+		assert.Equal(data, result)
+		assert.Equal(len(buf), consumed)
+
+		blockLen, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(blockLen, consumed)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		buf := PackUint32(nil, nil)
+		scratch := make([]uint32, blockSize)
+
+		result, consumed, err := UnpackUint32WithBufferAndLength(nil, scratch, buf)
+		assert.NoError(err)
+		assert.Nil(result)
+		assert.Equal(len(buf), consumed)
+	})
+
+	t.Run("scratchTooSmall", func(t *testing.T) {
+		validBuf := PackUint32(nil, genSequential(blockSize))
+		dst := make([]uint32, 0, blockSize)
+		scratch := make([]uint32, 64)
+		_, _, err := UnpackUint32WithBufferAndLength(dst, scratch, validBuf)
+		assert.Error(err)
+		assert.Contains(err.Error(), "scratch capacity too small")
+	})
+}
+
+// TestWithLengthConsumedMatchesBlockLength verifies all unpack variants and
+// BlockLength agree on byte counts across various data patterns.
+func TestWithLengthConsumedMatchesBlockLength(t *testing.T) {
+	assert := assert.New(t)
+
+	cases := []struct {
+		name string
+		src  []uint32
+	}{
+		{"nil", nil},
+		{"sequential", genSequential(blockSize)},
+		{"smallExceptions", genDataWithSmallExceptions()},
+		{"largeExceptions", genDataWithLargeExceptions()},
+		{"shortBlock", []uint32{0, 1, 1, 2, 3, 5, 8, 13, 21}},
+		{"singleValue", []uint32{123456}},
+		{"maxValues", func() []uint32 {
+			max := ^uint32(0)
+			return []uint32{max, 0, max - 1, 1234567890, 42, max}
+		}()},
+	}
+
+	scratch := make([]uint32, blockSize)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := PackUint32(nil, tc.src)
+
+			blockLen, err := BlockLength(buf)
+			assert.NoError(err)
+			assert.Equal(len(buf), blockLen)
+
+			// UnpackUint32 (original, no byte count)
+			decodedA, err := UnpackUint32(nil, buf)
+			assert.NoError(err)
+			assert.Equal(tc.src, decodedA)
+
+			// UnpackUint32WithBuffer (original, no byte count)
+			decodedB, err := UnpackUint32WithBuffer(nil, scratch, buf)
+			assert.NoError(err)
+			assert.Equal(tc.src, decodedB)
+
+			// UnpackUint32WithLength (new)
+			decodedC, consumedC, err := UnpackUint32WithLength(nil, buf)
+			assert.NoError(err)
+			assert.Equal(tc.src, decodedC)
+			assert.Equal(blockLen, consumedC, "WithLength consumed mismatch")
+
+			// UnpackUint32WithBufferAndLength (new)
+			decodedD, consumedD, err := UnpackUint32WithBufferAndLength(nil, scratch, buf)
+			assert.NoError(err)
+			assert.Equal(tc.src, decodedD)
+			assert.Equal(blockLen, consumedD, "WithBufferAndLength consumed mismatch")
+		})
+	}
+}
+
+// TestWithLengthDeltaEncoded verifies the WithLength variants with delta-encoded data.
+func TestWithLengthDeltaEncoded(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("monotonic", func(t *testing.T) {
+		original := genMonotonic(blockSize)
+		src := slices.Clone(original)
+		buf := PackDeltaUint32(nil, src)
+
+		result, consumed, err := UnpackUint32WithLength(nil, buf)
+		assert.NoError(err)
+		assert.Equal(original, result)
+		assert.Equal(len(buf), consumed)
+
+		blockLen, err := BlockLength(buf)
+		assert.NoError(err)
+		assert.Equal(blockLen, consumed)
+	})
+
+	t.Run("zigzag", func(t *testing.T) {
+		original := []uint32{1000, 900, 950, 800, 1200, 1199, 1300, 900, 901}
+		src := slices.Clone(original)
+		buf := PackDeltaUint32(nil, src)
+
+		result, consumed, err := UnpackUint32WithLength(nil, buf)
+		assert.NoError(err)
+		assert.Equal(original, result)
+		assert.Equal(len(buf), consumed)
+	})
+
+	t.Run("overflowReported", func(t *testing.T) {
+		deltas := []uint32{0xFFFFFFFF, 1}
+		buf := PackAlreadyDeltaUint32(nil, deltas)
+
+		_, consumed, err := UnpackUint32WithLength(nil, buf)
+		var overflow *ErrOverflow
+		assert.True(errors.As(err, &overflow), "overflow error should be returned")
+		assert.Equal(uint8(1), overflow.Position)
+		assert.Equal(len(buf), consumed, "bytesConsumed should be valid even on overflow")
+	})
+}
+
+// TestWithLengthMultiBlock demonstrates iterating over consecutive blocks
+// using the WithLength variants (the primary use case from Issue #1).
+func TestWithLengthMultiBlock(t *testing.T) {
+	assert := assert.New(t)
+
+	blocks := [][]uint32{
+		genSequential(blockSize),
+		genDataWithSmallExceptions(),
+		{42, 100, 200},
+		genMonotonic(64),
+	}
+
+	// Pack all blocks into a single buffer
+	var combined []byte
+	for _, block := range blocks {
+		combined = PackUint32(combined, block)
+	}
+
+	// Iterate using UnpackUint32WithLength
+	offset := 0
+	for i, expected := range blocks {
+		result, consumed, err := UnpackUint32WithLength(nil, combined[offset:])
+		assert.NoError(err, "block %d", i)
+		assert.Equal(expected, result, "block %d", i)
+		assert.Greater(consumed, 0, "block %d must consume bytes", i)
+		offset += consumed
+	}
+	assert.Equal(len(combined), offset, "should consume entire buffer")
+
+	// Same iteration using UnpackUint32WithBufferAndLength
+	offset = 0
+	scratch := make([]uint32, blockSize)
+	for i, expected := range blocks {
+		result, consumed, err := UnpackUint32WithBufferAndLength(nil, scratch, combined[offset:])
+		assert.NoError(err, "block %d", i)
+		assert.Equal(expected, result, "block %d", i)
+		offset += consumed
+	}
+	assert.Equal(len(combined), offset, "should consume entire buffer")
+}
+
 // buildExceptionBuf creates a properly formatted exception buffer for testing.
 // Layout: count(1) + svb_len(2) + positions(N) + StreamVByte(M)
 func buildExceptionBuf(positions []byte, highBits []uint32) []byte {
@@ -1887,6 +2157,60 @@ func BenchmarkUnpackStackVsHeapBuffer(b *testing.B) {
 			resultU32 = dst
 		})
 	})
+}
+
+// BenchmarkUnpackUint32WithLength measures decoding + byte length for sequential data.
+func BenchmarkUnpackUint32WithLength(b *testing.B) {
+	buf := PackUint32(nil, genSequential(blockSize))
+	dst := make([]uint32, 0, blockSize)
+	b.ReportAllocs()
+	var consumed int
+	for range b.N {
+		dst, consumed, _ = UnpackUint32WithLength(dst[:0], buf)
+	}
+	resultU32 = dst
+	_ = consumed
+}
+
+// BenchmarkUnpackUint32WithBufferAndLength measures decoding + byte length with buffer reuse.
+func BenchmarkUnpackUint32WithBufferAndLength(b *testing.B) {
+	buf := PackUint32(nil, genSequential(blockSize))
+	dst := make([]uint32, 0, blockSize)
+	scratch := make([]uint32, blockSize)
+	b.ReportAllocs()
+	var consumed int
+	for range b.N {
+		dst, consumed, _ = UnpackUint32WithBufferAndLength(dst[:0], scratch, buf)
+	}
+	resultU32 = dst
+	_ = consumed
+}
+
+// BenchmarkUnpackWithLengthExceptions measures WithLength decoding for data with exceptions.
+func BenchmarkUnpackWithLengthExceptions(b *testing.B) {
+	buf := PackUint32(nil, genDataWithSmallExceptions())
+	dst := make([]uint32, 0, blockSize)
+	b.ReportAllocs()
+	var consumed int
+	for range b.N {
+		dst, consumed, _ = UnpackUint32WithLength(dst[:0], buf)
+	}
+	resultU32 = dst
+	_ = consumed
+}
+
+// BenchmarkUnpackWithBufferAndLengthExceptions measures WithBufferAndLength for data with exceptions.
+func BenchmarkUnpackWithBufferAndLengthExceptions(b *testing.B) {
+	buf := PackUint32(nil, genDataWithSmallExceptions())
+	dst := make([]uint32, 0, blockSize)
+	scratch := make([]uint32, blockSize)
+	b.ReportAllocs()
+	var consumed int
+	for range b.N {
+		dst, consumed, _ = UnpackUint32WithBufferAndLength(dst[:0], scratch, buf)
+	}
+	resultU32 = dst
+	_ = consumed
 }
 
 // ----------------------------------------------------------------------------
