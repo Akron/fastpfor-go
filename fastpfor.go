@@ -41,6 +41,9 @@ func (e *ErrOverflow) Error() string {
 // ErrInvalidFlags is returned when the header contains an invalid flag combination.
 var ErrInvalidFlags = errors.New("fastpfor: invalid header flags")
 
+// ErrInvalidBlockLength is returned when the block length is negative or exceeds the maximum.
+var ErrInvalidBlockLength = errors.New("fastpfor: invalid block length")
+
 // Block configuration constants. PackUint32/UnpackUint32 always operates on at most 128
 // integers, interleaved into 4 lanes to match the SIMD-PFOR layout.
 const (
@@ -508,15 +511,16 @@ func deltasWillOverflow(deltas []uint32) bool {
 	return false
 }
 
-// validateBlockLength panics if the caller tries to encode more than BlockSize
-// integers. FastPFOR always operates on fixed 128-value chunks.
-func validateBlockLength(n int) {
+// validateBlockLength returns an error if the caller tries to encode more than
+// BlockSize integers or a negative count. FastPFOR always operates on fixed 128-value chunks.
+func validateBlockLength(n int) error {
 	if n < 0 {
-		panic(fmt.Sprintf("fastpfor: invalid block length %d (cannot be negative)", n))
+		return fmt.Errorf("%w: invalid block length %d (cannot be negative)", ErrInvalidBlockLength, n)
 	}
 	if n > blockSize {
-		panic(fmt.Sprintf("fastpfor: block length %d exceeds maximum %d", n, blockSize))
+		return fmt.Errorf("%w: block length %d exceeds maximum %d", ErrInvalidBlockLength, n, blockSize)
 	}
+	return nil
 }
 
 // ensureUint32Cap ensures the destination slice has at least minCap capacity

@@ -636,21 +636,20 @@ func TestRequiredBitWidthScalar(t *testing.T) {
 	assert.Equal(32, requiredBitWidthScalar(max), "max uint32 forces 32 bits")
 }
 
-// TestValidateBlockLengthDirect ensures the guard panics for invalid lengths
+// TestValidateBlockLengthDirect ensures the guard returns errors for invalid lengths
 // without going through PackUint32/UnpackUint32.
 func TestValidateBlockLengthDirect(t *testing.T) {
 	assert := assert.New(t)
-	assert.NotPanics(func() { validateBlockLength(0) })
-	assert.NotPanics(func() { validateBlockLength(blockSize) })
+	assert.NoError(validateBlockLength(0))
+	assert.NoError(validateBlockLength(blockSize))
 
-	assert.PanicsWithValue(
-		fmt.Sprintf("fastpfor: invalid block length %d (cannot be negative)", -1),
-		func() { validateBlockLength(-1) },
-	)
-	assert.PanicsWithValue(
-		fmt.Sprintf("fastpfor: block length %d exceeds maximum %d", blockSize+1, blockSize),
-		func() { validateBlockLength(blockSize + 1) },
-	)
+	err := validateBlockLength(-1)
+	assert.ErrorIs(err, ErrInvalidBlockLength)
+	assert.Contains(err.Error(), "cannot be negative")
+
+	err = validateBlockLength(blockSize + 1)
+	assert.ErrorIs(err, ErrInvalidBlockLength)
+	assert.Contains(err.Error(), fmt.Sprintf("exceeds maximum %d", blockSize))
 }
 
 // TestSIMDScalarFormatCompatibility verifies that SIMD and scalar implementations produce
