@@ -293,7 +293,7 @@ func UnpackUint32(dst []uint32, buf []byte) ([]uint32, error) {
 	// Handle exceptions (StreamVByte format), using a stack scratch buffer
 	if hasExceptions {
 		var scratch [blockSize]uint32
-		if err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch[:]); err != nil {
+		if _, err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch[:]); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
 		}
 	}
@@ -358,7 +358,7 @@ func UnpackUint32WithBuffer(dst []uint32, scratch []uint32, buf []byte) ([]uint3
 	// Handle exceptions (StreamVByte format), using caller-provided scratch buffer
 	if hasExceptions {
 		scratch = scratch[:blockSize]
-		if err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch); err != nil {
+		if _, err := applyExceptions(dst[:count], buf, minNeeded, count, bitWidth, scratch); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
 		}
 	}
@@ -439,10 +439,11 @@ func UnpackUint32WithBufferAndLength(dst []uint32, scratch []uint32, buf []byte)
 
 	// Handle exceptions (StreamVByte format).
 	if hasExceptions {
-		bytesConsumed = blockBytesConsumed(buf, payloadEnd)
-		if err := applyExceptions(dst[:count], buf, payloadEnd, count, bitWidth, scratch); err != nil {
+		patchBytes, err := applyExceptions(dst[:count], buf, payloadEnd, count, bitWidth, scratch)
+		if err != nil {
 			return nil, 0, fmt.Errorf("%w: %v", ErrInvalidBuffer, err)
 		}
+		bytesConsumed = payloadEnd + patchBytes
 	}
 
 	// Apply delta decoding if the data was delta-encoded.
@@ -825,11 +826,12 @@ func writeExceptionsDirect(dst []byte, values []uint32, bitWidth int, highBits [
 // applyExceptions reads exception data from buf at the given offset and applies
 // them to dst by reinserting the high parts that were spilled into the exception table.
 // The scratch slice is used for StreamVByte decoding to avoid allocations.
-// Returns an error if the buffer is malformed.
+// Returns the total number of patch bytes consumed (1+2+excCount+svbLen) and
+// an error if the buffer is malformed.
 // Layout: count(1) + svb_len(2) + positions(N) + StreamVByte(M)
-func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scratch []uint32) error {
+func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scratch []uint32) (int, error) {
 	if len(buf) < offset+1 {
-		return fmt.Errorf("fastpfor: missing exception count byte at offset %d", offset)
+		return 0, fmt.Errorf("fastpfor: missing exception count byte at offset %d", offset)
 	}
 
 	patch := buf[offset:]
@@ -837,24 +839,24 @@ func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scra
 	patch = patch[1:]
 
 	if len(scratch) < excCount {
-		return fmt.Errorf("fastpfor: scratch buffer too small (need %d, got %d)", excCount, len(scratch))
+		return 0, fmt.Errorf("fastpfor: scratch buffer too small (need %d, got %d)", excCount, len(scratch))
 	}
 	if len(patch) < 2 {
-		return fmt.Errorf("fastpfor: missing StreamVByte length (need 2 bytes, got %d)", len(patch))
+		return 0, fmt.Errorf("fastpfor: missing StreamVByte length (need 2 bytes, got %d)", len(patch))
 	}
 
 	svbLen := int(bo.Uint16(patch[:2]))
 	patch = patch[2:]
 
 	if len(patch) < excCount {
-		return fmt.Errorf("fastpfor: truncated exception positions (need %d bytes, got %d)", excCount, len(patch))
+		return 0, fmt.Errorf("fastpfor: truncated exception positions (need %d bytes, got %d)", excCount, len(patch))
 	}
 
 	positions := patch[:excCount]
 	patch = patch[excCount:]
 
 	if len(patch) < svbLen {
-		return fmt.Errorf("fastpfor: truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch))
+		return 0, fmt.Errorf("fastpfor: truncated StreamVByte data (need %d bytes, got %d)", svbLen, len(patch))
 	}
 
 	// Decode high bits from StreamVByte into scratch buffer (avoids allocation)
@@ -863,12 +865,11 @@ func applyExceptions(dst []uint32, buf []byte, offset, count, bitWidth int, scra
 	})
 	for i, idx := range positions {
 		if int(idx) >= count {
-			return fmt.Errorf("fastpfor: exception index %d out of range (max %d)", int(idx), count-1)
+			return 0, fmt.Errorf("fastpfor: exception index %d out of range (max %d)", int(idx), count-1)
 		}
-		// OR the high bits of the exception value into the unpacked value at the specified index
 		dst[int(idx)] |= highBits[i] << bitWidth
 	}
-	return nil
+	return 1 + 2 + excCount + svbLen, nil
 }
 
 // deltaEncodeScalar computes first-order deltas in-place (dst may alias src).

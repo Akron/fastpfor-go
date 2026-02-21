@@ -259,7 +259,7 @@ func (r *SlimReader) getWithDelta(pos uint32) uint32 {
 	// Apply exceptions if present, using values[blockSize:] as scratch
 	if r.flags&slimFlagExceptions != 0 {
 		scratch := values[blockSize : 2*blockSize]
-		_ = applyExceptions(values[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
+		_, _ = applyExceptions(values[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
 	}
 
 	// Apply delta decoding (with overflow detection if will-overflow flag is set)
@@ -393,7 +393,7 @@ func (r *SlimReader) Decode(dst []uint32) []uint32 {
 	// Apply exceptions if present, using dst[blockSize:] as scratch
 	if r.flags&slimFlagExceptions != 0 {
 		scratch := dst[blockSize : 2*blockSize]
-		_ = applyExceptions(dst[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
+		_, _ = applyExceptions(dst[:count], r.buf, int(r.payloadEnd), count, bitWidth, scratch)
 	}
 
 	// Apply delta decoding if needed (with overflow detection if will-overflow flag is set)

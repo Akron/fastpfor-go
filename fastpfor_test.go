@@ -796,8 +796,9 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 		highBits := []uint32{5, 2}
 		buf := buildExceptionBuf(positions, highBits)
 
-		err := applyExceptions(dst, buf, 0, len(dst), 3, scratch)
+		patchBytes, err := applyExceptions(dst, buf, 0, len(dst), 3, scratch)
 		assert.NoError(err)
+		assert.Equal(len(buf), patchBytes, "patch bytes should match buffer length")
 		assert.Equal(uint32(2)|(5<<3), dst[1], "unexpected patch at index 1")
 		assert.Equal(uint32(4)|(2<<3), dst[3], "unexpected patch at index 3")
 	})
@@ -807,7 +808,7 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 		scratch := make([]uint32, blockSize)
 		positions := []byte{byte(len(dst))} // index 4 is out of range for 4-element slice
 		buf := buildExceptionBuf(positions, []uint32{1})
-		err := applyExceptions(dst, buf, 0, len(dst), 5, scratch)
+		_, err := applyExceptions(dst, buf, 0, len(dst), 5, scratch)
 		assert.Error(err)
 		assert.Contains(err.Error(), fmt.Sprintf("exception index %d out of range", len(dst)))
 	})
@@ -815,7 +816,7 @@ func TestApplyExceptionsBehavior(t *testing.T) {
 	t.Run("errorOnTruncatedBuffer", func(t *testing.T) {
 		dst := make([]uint32, 4)
 		scratch := make([]uint32, blockSize)
-		err := applyExceptions(dst, []byte{}, 0, len(dst), 5, scratch)
+		_, err := applyExceptions(dst, []byte{}, 0, len(dst), 5, scratch)
 		assert.Error(err)
 		assert.Contains(err.Error(), "missing exception count byte")
 	})
@@ -2210,6 +2211,174 @@ func BenchmarkUnpackWithBufferAndLengthExceptions(b *testing.B) {
 	}
 	resultU32 = dst
 	_ = consumed
+}
+
+// BenchmarkUnpackHotPathCompare compares decode-only, decode+length, and
+// separate BlockLength+decode workflows for hot-path tuning.
+func BenchmarkUnpackHotPathCompare(b *testing.B) {
+	cases := []struct {
+		name string
+		src  []uint32
+	}{
+		{"NoExceptions", genSequential(blockSize)},
+		{"WithExceptions", genDataWithSmallExceptions()},
+	}
+
+	for _, tc := range cases {
+		buf := PackUint32(nil, tc.src)
+
+		b.Run(tc.name, func(b *testing.B) {
+			b.Run("UnpackWithBuffer", func(b *testing.B) {
+				dst := make([]uint32, 0, blockSize)
+				scratch := make([]uint32, blockSize)
+				b.ReportAllocs()
+				for range b.N {
+					var err error
+					dst, err = UnpackUint32WithBuffer(dst[:0], scratch, buf)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				resultU32 = dst
+			})
+
+			b.Run("UnpackWithBufferAndLength", func(b *testing.B) {
+				dst := make([]uint32, 0, blockSize)
+				scratch := make([]uint32, blockSize)
+				var consumed int
+				b.ReportAllocs()
+				for range b.N {
+					var err error
+					dst, consumed, err = UnpackUint32WithBufferAndLength(dst[:0], scratch, buf)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				resultU32 = dst
+				_ = consumed
+			})
+
+			b.Run("BlockLengthThenUnpackWithBuffer", func(b *testing.B) {
+				dst := make([]uint32, 0, blockSize)
+				scratch := make([]uint32, blockSize)
+				var consumed int
+				b.ReportAllocs()
+				for range b.N {
+					var err error
+					consumed, err = BlockLength(buf)
+					if err != nil {
+						b.Fatal(err)
+					}
+					dst, err = UnpackUint32WithBuffer(dst[:0], scratch, buf[:consumed])
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				resultU32 = dst
+				_ = consumed
+			})
+		})
+	}
+}
+
+// BenchmarkBlockLength measures standalone block-size scanning throughput.
+func BenchmarkBlockLength(b *testing.B) {
+	cases := []struct {
+		name string
+		src  []uint32
+	}{
+		{"NoExceptions", genSequential(blockSize)},
+		{"WithExceptions", genDataWithSmallExceptions()},
+	}
+
+	for _, tc := range cases {
+		buf := PackUint32(nil, tc.src)
+
+		b.Run(tc.name, func(b *testing.B) {
+			var consumed int
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				consumed, err = BlockLength(buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			_ = consumed
+		})
+	}
+}
+
+// blockLengthInlineForBench mirrors BlockLength but computes the exception size
+// inline (without calling blockBytesConsumed). Used to measure helper-call overhead.
+func blockLengthInlineForBench(buf []byte) (int, error) {
+	if len(buf) < headerBytes {
+		return 0, ErrInvalidBuffer
+	}
+	count, bitWidth, _, hasExceptions, _, _, _ := decodeHeader(bo.Uint32(buf[:headerBytes]))
+	if count > blockSize {
+		return 0, ErrInvalidBuffer
+	}
+
+	payloadEnd := headerBytes + payloadBytes(bitWidth)
+	if !hasExceptions {
+		return payloadEnd, nil
+	}
+
+	minExcMeta := payloadEnd + 1 + 2
+	if len(buf) < minExcMeta {
+		return 0, ErrInvalidBuffer
+	}
+	excCount := int(buf[payloadEnd])
+	if excCount > blockSize {
+		return 0, ErrInvalidBuffer
+	}
+	svbLen := int(bo.Uint16(buf[payloadEnd+1 : payloadEnd+3]))
+	return payloadEnd + 1 + 2 + excCount + svbLen, nil
+}
+
+// BenchmarkBlockLengthHelperOverhead compares BlockLength against an inlined
+// equivalent to quantify any overhead from using blockBytesConsumed as a helper.
+func BenchmarkBlockLengthHelperOverhead(b *testing.B) {
+	cases := []struct {
+		name string
+		src  []uint32
+	}{
+		{"NoExceptions", genSequential(blockSize)},
+		{"WithExceptions", genDataWithSmallExceptions()},
+	}
+
+	for _, tc := range cases {
+		buf := PackUint32(nil, tc.src)
+
+		b.Run(tc.name, func(b *testing.B) {
+			b.Run("BlockLength", func(b *testing.B) {
+				var consumed int
+				b.ReportAllocs()
+				for range b.N {
+					var err error
+					consumed, err = BlockLength(buf)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				_ = consumed
+			})
+
+			b.Run("InlineEquivalent", func(b *testing.B) {
+				var consumed int
+				b.ReportAllocs()
+				for range b.N {
+					var err error
+					consumed, err = blockLengthInlineForBench(buf)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				_ = consumed
+			})
+		})
+	}
 }
 
 // ----------------------------------------------------------------------------
